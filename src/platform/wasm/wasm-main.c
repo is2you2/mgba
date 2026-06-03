@@ -36,10 +36,12 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
         return 0;
     }
 
-    core->init(core);
+    mCoreInitConfig(core, NULL);
     mCoreConfigSetDefaultValue(&core->config, "useBios", "no");
     mCoreConfigSetDefaultValue(&core->config, "skipBios", "yes");
-    mCoreInitConfig(core, NULL);
+    
+    core->init(core);
+    mCoreLoadConfig(core);
 
     if (!core->loadROM(core, vf)) {
         core->deinit(core);
@@ -54,6 +56,10 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
     videoBuffer = (uint32_t*)malloc(videoWidth * videoHeight * sizeof(uint32_t));
     memset(videoBuffer, 0, videoWidth * videoHeight * sizeof(uint32_t));
     core->setVideoBuffer(core, (mColor*)videoBuffer, videoWidth);
+    
+    if (core->reloadConfigOption) {
+        core->reloadConfigOption(core, "hwaccelVideo", NULL);
+    }
 
     core->setAudioBufferSize(core, 4096);
     
@@ -68,8 +74,10 @@ void mgba_run_frame() {
     if (core) {
         core->runFrame(core);
         frameCount++;
-        for (unsigned i = 0; i < videoWidth * videoHeight; ++i) {
-            videoBuffer[i] |= 0xFF000000;
+        if (videoBuffer) {
+            for (unsigned i = 0; i < videoWidth * videoHeight; ++i) {
+                videoBuffer[i] |= 0xFF000000;
+            }
         }
     }
 }
