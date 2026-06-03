@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /root/mgba
+CMAKE_SOURCE_DIR = /root/projects/mgba
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /root/mgba/build-wasm
+CMAKE_BINARY_DIR = /root/projects/mgba/build-wasm
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -68,7 +68,7 @@ CMAKE_BINARY_DIR = /root/mgba/build-wasm
 # Special rule for the target package
 package: preinstall
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Run CPack packaging tool..."
-	cd /root/mgba/build-wasm && /usr/bin/cpack --config ./CPackConfig.cmake
+	cd /root/projects/mgba/build-wasm && /usr/bin/cpack --config ./CPackConfig.cmake
 .PHONY : package
 
 # Special rule for the target package
@@ -78,7 +78,7 @@ package/fast: package
 # Special rule for the target package_source
 package_source:
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Run CPack packaging tool for source..."
-	cd /root/mgba/build-wasm && /usr/bin/cpack --config ./CPackSourceConfig.cmake
+	cd /root/projects/mgba/build-wasm && /usr/bin/cpack --config ./CPackSourceConfig.cmake
 .PHONY : package_source
 
 # Special rule for the target package_source
@@ -152,14 +152,14 @@ install/strip/fast: preinstall/fast
 
 # The main all target
 all: cmake_check_build_system
-	cd /root/mgba/build-wasm && $(CMAKE_COMMAND) -E cmake_progress_start /root/mgba/build-wasm/CMakeFiles /root/mgba/build-wasm/discord-rpc/src//CMakeFiles/progress.marks
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/all
-	$(CMAKE_COMMAND) -E cmake_progress_start /root/mgba/build-wasm/CMakeFiles 0
+	cd /root/projects/mgba/build-wasm && $(CMAKE_COMMAND) -E cmake_progress_start /root/projects/mgba/build-wasm/CMakeFiles /root/projects/mgba/build-wasm/discord-rpc/src//CMakeFiles/progress.marks
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /root/projects/mgba/build-wasm/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
 clean:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/clean
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/clean
 .PHONY : clean
 
 # The main clean target
@@ -168,22 +168,22 @@ clean/fast: clean
 
 # Prepare targets for installation.
 preinstall: all
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/preinstall
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/preinstall
 .PHONY : preinstall
 
 # Prepare targets for installation.
 preinstall/fast:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/preinstall
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/preinstall
 .PHONY : preinstall/fast
 
 # clear depends
 depend:
-	cd /root/mgba/build-wasm && $(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
+	cd /root/projects/mgba/build-wasm && $(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
 .PHONY : depend
 
 # Convenience name for target.
 discord-rpc/src/CMakeFiles/discord-rpc.dir/rule:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/CMakeFiles/discord-rpc.dir/rule
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 discord-rpc/src/CMakeFiles/discord-rpc.dir/rule
 .PHONY : discord-rpc/src/CMakeFiles/discord-rpc.dir/rule
 
 # Convenience name for target.
@@ -192,7 +192,7 @@ discord-rpc: discord-rpc/src/CMakeFiles/discord-rpc.dir/rule
 
 # fast build rule for target.
 discord-rpc/fast:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/build
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/build
 .PHONY : discord-rpc/fast
 
 connection_unix.o: connection_unix.cpp.o
@@ -200,7 +200,7 @@ connection_unix.o: connection_unix.cpp.o
 
 # target to build an object file
 connection_unix.cpp.o:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/connection_unix.cpp.o
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/connection_unix.cpp.o
 .PHONY : connection_unix.cpp.o
 
 connection_unix.i: connection_unix.cpp.i
@@ -208,7 +208,7 @@ connection_unix.i: connection_unix.cpp.i
 
 # target to preprocess a source file
 connection_unix.cpp.i:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/connection_unix.cpp.i
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/connection_unix.cpp.i
 .PHONY : connection_unix.cpp.i
 
 connection_unix.s: connection_unix.cpp.s
@@ -216,7 +216,7 @@ connection_unix.s: connection_unix.cpp.s
 
 # target to generate assembly for a file
 connection_unix.cpp.s:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/connection_unix.cpp.s
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/connection_unix.cpp.s
 .PHONY : connection_unix.cpp.s
 
 discord_register_linux.o: discord_register_linux.cpp.o
@@ -224,7 +224,7 @@ discord_register_linux.o: discord_register_linux.cpp.o
 
 # target to build an object file
 discord_register_linux.cpp.o:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_register_linux.cpp.o
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_register_linux.cpp.o
 .PHONY : discord_register_linux.cpp.o
 
 discord_register_linux.i: discord_register_linux.cpp.i
@@ -232,7 +232,7 @@ discord_register_linux.i: discord_register_linux.cpp.i
 
 # target to preprocess a source file
 discord_register_linux.cpp.i:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_register_linux.cpp.i
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_register_linux.cpp.i
 .PHONY : discord_register_linux.cpp.i
 
 discord_register_linux.s: discord_register_linux.cpp.s
@@ -240,7 +240,7 @@ discord_register_linux.s: discord_register_linux.cpp.s
 
 # target to generate assembly for a file
 discord_register_linux.cpp.s:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_register_linux.cpp.s
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_register_linux.cpp.s
 .PHONY : discord_register_linux.cpp.s
 
 discord_rpc.o: discord_rpc.cpp.o
@@ -248,7 +248,7 @@ discord_rpc.o: discord_rpc.cpp.o
 
 # target to build an object file
 discord_rpc.cpp.o:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_rpc.cpp.o
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_rpc.cpp.o
 .PHONY : discord_rpc.cpp.o
 
 discord_rpc.i: discord_rpc.cpp.i
@@ -256,7 +256,7 @@ discord_rpc.i: discord_rpc.cpp.i
 
 # target to preprocess a source file
 discord_rpc.cpp.i:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_rpc.cpp.i
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_rpc.cpp.i
 .PHONY : discord_rpc.cpp.i
 
 discord_rpc.s: discord_rpc.cpp.s
@@ -264,7 +264,7 @@ discord_rpc.s: discord_rpc.cpp.s
 
 # target to generate assembly for a file
 discord_rpc.cpp.s:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_rpc.cpp.s
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/discord_rpc.cpp.s
 .PHONY : discord_rpc.cpp.s
 
 rpc_connection.o: rpc_connection.cpp.o
@@ -272,7 +272,7 @@ rpc_connection.o: rpc_connection.cpp.o
 
 # target to build an object file
 rpc_connection.cpp.o:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/rpc_connection.cpp.o
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/rpc_connection.cpp.o
 .PHONY : rpc_connection.cpp.o
 
 rpc_connection.i: rpc_connection.cpp.i
@@ -280,7 +280,7 @@ rpc_connection.i: rpc_connection.cpp.i
 
 # target to preprocess a source file
 rpc_connection.cpp.i:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/rpc_connection.cpp.i
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/rpc_connection.cpp.i
 .PHONY : rpc_connection.cpp.i
 
 rpc_connection.s: rpc_connection.cpp.s
@@ -288,7 +288,7 @@ rpc_connection.s: rpc_connection.cpp.s
 
 # target to generate assembly for a file
 rpc_connection.cpp.s:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/rpc_connection.cpp.s
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/rpc_connection.cpp.s
 .PHONY : rpc_connection.cpp.s
 
 serialization.o: serialization.cpp.o
@@ -296,7 +296,7 @@ serialization.o: serialization.cpp.o
 
 # target to build an object file
 serialization.cpp.o:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/serialization.cpp.o
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/serialization.cpp.o
 .PHONY : serialization.cpp.o
 
 serialization.i: serialization.cpp.i
@@ -304,7 +304,7 @@ serialization.i: serialization.cpp.i
 
 # target to preprocess a source file
 serialization.cpp.i:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/serialization.cpp.i
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/serialization.cpp.i
 .PHONY : serialization.cpp.i
 
 serialization.s: serialization.cpp.s
@@ -312,7 +312,7 @@ serialization.s: serialization.cpp.s
 
 # target to generate assembly for a file
 serialization.cpp.s:
-	cd /root/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/serialization.cpp.s
+	cd /root/projects/mgba/build-wasm && $(MAKE) $(MAKESILENT) -f discord-rpc/src/CMakeFiles/discord-rpc.dir/build.make discord-rpc/src/CMakeFiles/discord-rpc.dir/serialization.cpp.s
 .PHONY : serialization.cpp.s
 
 # Help Target
@@ -356,6 +356,6 @@ help:
 # No rule that depends on this can have commands that come from listfiles
 # because they might be regenerated.
 cmake_check_build_system:
-	cd /root/mgba/build-wasm && $(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 0
+	cd /root/projects/mgba/build-wasm && $(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 0
 .PHONY : cmake_check_build_system
 
