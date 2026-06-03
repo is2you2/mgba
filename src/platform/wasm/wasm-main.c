@@ -1,0 +1,116 @@
+#include <emscripten.h>
+#include <mgba/core/core.h>
+#include <mgba/core/interface.h>
+#include <mgba/core/config.h>
+#include <mgba/core/serialize.h>
+#include <mgba-util/vfs.h>
+#include <stdlib.h>
+#include <string.h>
+
+static struct mCore* core = NULL;
+static uint32_t* videoBuffer = NULL;
+static unsigned videoWidth = 0;
+static unsigned videoHeight = 0;
+
+EMSCRIPTEN_KEEPALIVE
+int mgba_init() {
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int mgba_load_rom(uint8_t* buffer, size_t size) {
+    if (core) {
+        core->deinit(core);
+        core = NULL;
+    }
+
+    struct VFile* vf = VFileFromMemory(buffer, size);
+    if (!vf) return 0;
+
+    core = mCoreFindVF(vf);
+    if (!core) {
+        vf->close(vf);
+        return 0;
+    }
+
+    core->init(core);
+    mCoreInitConfig(core, NULL);
+    core->loadROM(core, vf);
+    core->reset(core);
+
+    core->currentVideoSize(core, &videoWidth, &videoHeight);
+    if (videoBuffer) free(videoBuffer);
+    videoBuffer = (uint32_t*)malloc(videoWidth * videoHeight * sizeof(uint32_t));
+    core->setVideoBuffer(core, (mColor*)videoBuffer, videoWidth);
+
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_run_frame() {
+    if (core) {
+        core->runFrame(core);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t* mgba_get_video_buffer() {
+    return videoBuffer;
+}
+
+EMSCRIPTEN_KEEPALIVE
+unsigned mgba_get_width() {
+    return videoWidth;
+}
+
+EMSCRIPTEN_KEEPALIVE
+unsigned mgba_get_height() {
+    return videoHeight;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_set_button(int button, int pressed) {
+    if (core) {
+        if (pressed) {
+            core->addKeys(core, 1 << button);
+        } else {
+            core->clearKeys(core, 1 << button);
+        }
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t* mgba_save_state(size_t* outSize) {
+    if (!core) return NULL;
+    
+    // Allocate a large enough buffer for the save state
+    size_t bufferSize = 2 * 1024 * 1024; // 2MB should be plenty
+    uint8_t* buffer = (uint8_t*)malloc(bufferSize);
+    struct VFile* vf = VFileFromMemory(buffer, bufferSize);
+    
+    if (!mCoreSaveStateNamed(core, vf, SAVESTATE_SCREENSHOT)) {
+        vf->close(vf);
+        free(buffer);
+        return NULL;
+    }
+    
+    *outSize = vf->size(vf);
+    vf->close(vf);
+    
+    // Return the buffer, JS is responsible for calling mgba_free_buffer
+    return buffer;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int mgba_load_state(uint8_t* buffer, size_t size) {
+    if (!core) return 0;
+    struct VFile* vf = VFileFromConstMemory(buffer, size);
+    bool success = mCoreLoadStateNamed(core, vf, SAVESTATE_SCREENSHOT);
+    vf->close(vf);
+    return success ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_free_buffer(void* ptr) {
+    free(ptr);
+}
