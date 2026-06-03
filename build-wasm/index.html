@@ -5,7 +5,23 @@
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; margin: 0; padding: 20px; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .player-box { background: white; padding: 10px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; flex-direction: column; align-items: center; }
+        .player-box { 
+            background: white; 
+            padding: 10px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 3px solid transparent;
+        }
+        .player-box.focused {
+            border-color: #007bff;
+            box-shadow: 0 0 15px rgba(0,123,255,0.3);
+            transform: scale(1.02);
+        }
         canvas {
             image-rendering: pixelated;
             border: 2px solid #333;
@@ -16,6 +32,7 @@
         #controls-global { margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; width: 100%; max-width: 980px; box-sizing: border-box; }
         .status-ready { color: green; font-weight: bold; }
         .player-label { margin-bottom: 5px; font-weight: bold; color: #444; }
+        .player-box.focused .player-label { color: #007bff; }
         .input-group { margin: 5px 0; }
     </style>
 </head>
@@ -26,27 +43,27 @@
         <span id="status">Loading WASM...</span>
         <button id="resume-audio" style="display:none">Enable Audio</button>
         <p style="font-size: 0.9em; color: #666; margin: 5px 0 0 0;">
-            Controls: Player 1 (Z, X, Shift, Enter, Arrows). Connect Link Cable by loading ROMs in multiple players.
+            Controls: Z (A), X (B), Shift (Select), Enter (Start), Arrows (D-Pad). <strong>Click a screen to control that player.</strong>
         </p>
     </div>
 
     <div class="grid">
-        <div class="player-box">
+        <div class="player-box focused" id="box-0" onclick="setFocus(0)">
             <div class="player-label">Player 1</div>
             <div class="input-group"><input type="file" class="rom-upload" data-index="0" accept=".gba,.gb,.gbc"></div>
             <canvas id="screen-0"></canvas>
         </div>
-        <div class="player-box">
+        <div class="player-box" id="box-1" onclick="setFocus(1)">
             <div class="player-label">Player 2</div>
             <div class="input-group"><input type="file" class="rom-upload" data-index="1" accept=".gba,.gb,.gbc"></div>
             <canvas id="screen-1"></canvas>
         </div>
-        <div class="player-box">
+        <div class="player-box" id="box-2" onclick="setFocus(2)">
             <div class="player-label">Player 3</div>
             <div class="input-group"><input type="file" class="rom-upload" data-index="2" accept=".gba,.gb,.gbc"></div>
             <canvas id="screen-2"></canvas>
         </div>
-        <div class="player-box">
+        <div class="player-box" id="box-3" onclick="setFocus(3)">
             <div class="player-label">Player 4</div>
             <div class="input-group"><input type="file" class="rom-upload" data-index="3" accept=".gba,.gb,.gbc"></div>
             <canvas id="screen-3"></canvas>
@@ -73,6 +90,7 @@
         let emulator = null;
         const players = [];
         const MAX_PLAYERS = 4;
+        let focusedPlayerIndex = 0;
 
         // Audio state
         let audioContext = null;
@@ -80,6 +98,13 @@
         const AUDIO_CHANNELS = 2;
         const AUDIO_BUFFER_SIZE = 4096;
         let audioPtr = 0;
+
+        function setFocus(index) {
+            focusedPlayerIndex = index;
+            document.querySelectorAll('.player-box').forEach((box, i) => {
+                box.classList.toggle('focused', i === index);
+            });
+        }
 
         createMGBA().then(m => {
             Module = m;
@@ -148,18 +173,15 @@
 
         function startLoop() {
             function frame() {
-                // Run all active players
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     if (players[i].active) {
                         emulator.runFrame(i);
-                        
                         const p = players[i];
                         const bufferPtr = emulator.getVideoBuffer(i);
                         const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
                         p.imageData.data.set(videoData);
                         p.ctx.putImageData(p.imageData, 0, 0);
 
-                        // Only handle audio for Player 1 for now (to avoid mix chaos, though they could be mixed)
                         if (i === 0 && audioContext && audioContext.state === 'running') {
                             const emulatorSampleRate = emulator.getAudioSampleRate(0) || 32768;
                             let numSamples;
@@ -183,7 +205,6 @@
                         }
                     }
                 }
-
                 if (audioContext && audioContext.state === 'suspended') {
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
@@ -200,9 +221,8 @@
         });
 
         const handleKey = (e, pressed) => {
-            // Forward keys to Player 1 (standard mapping for demo)
-            if (players[0].active && KEY_MAP[e.key] !== undefined) {
-                emulator.setButton(0, KEY_MAP[e.key], pressed);
+            if (players[focusedPlayerIndex].active && KEY_MAP[e.key] !== undefined) {
+                emulator.setButton(focusedPlayerIndex, KEY_MAP[e.key], pressed);
                 e.preventDefault();
             }
         };
