@@ -22,6 +22,7 @@ struct Player {
     unsigned videoHeight;
     struct GBASIOLockstepDriver lockstepDriver;
     struct mLockstepUser lockstepUser;
+    bool asleep;
 };
 
 static struct Player players[MAX_PLAYERS];
@@ -30,12 +31,13 @@ static bool coordinatorInitialized = false;
 
 // Mock lockstep user implementation for single-threaded WASM
 static void wasm_lockstep_sleep(struct mLockstepUser* user) {
-    // In a single-threaded environment, we don't actually sleep.
-    // The coordinator will handle the wait state.
+    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
+    p->asleep = true;
 }
 
 static void wasm_lockstep_wake(struct mLockstepUser* user) {
-    // No-op for single-threaded
+    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
+    p->asleep = false;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -110,19 +112,36 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
         GBASIOSetDriver(&gba->sio, &p->lockstepDriver.d);
     }
     
+    p->asleep = false;
     printf("WASM: Player %d ROM Loaded. Resolution: %ux%u\n", playerIndex, p->videoWidth, p->videoHeight);
     return 1;
 }
 
 EMSCRIPTEN_KEEPALIVE
-void mgba_run_frame(int playerIndex) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
-    struct Player* p = &players[playerIndex];
-    if (p->core) {
-        p->core->runFrame(p->core);
-        if (p->videoBuffer) {
-            for (unsigned i = 0; i < p->videoWidth * p->videoHeight; ++i) {
-                p->videoBuffer[i] |= 0xFF000000;
+void mgba_run_frame() {
+    // Interleaved execution for all players to ensure sync
+    const int INTERLEAVE_CYCLES = 256;
+    const int CYCLES_PER_FRAME = 280896; // Standard GBA frame cycles
+    
+    for (int cycles = 0; cycles < CYCLES_PER_FRAME; cycles += INTERLEAVE_CYCLES) {
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            struct Player* p = &players[i];
+            if (p->core && !p->asleep) {
+                // Run in small increments
+                for (int sub = 0; sub < INTERLEAVE_CYCLES; sub++) {
+                    p->core->step(p->core);
+                    if (p->asleep) break;
+                }
+            }
+        }
+    }
+
+    // Post-frame processing for all active players
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        struct Player* p = &players[i];
+        if (p->core && p->videoBuffer) {
+            for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
+                p->videoBuffer[j] |= 0xFF000000;
             }
         }
     }

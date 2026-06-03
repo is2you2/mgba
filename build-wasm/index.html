@@ -114,7 +114,7 @@
             emulator = {
                 init: Module.cwrap('mgba_init', 'number', []),
                 loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number', 'number']),
-                runFrame: Module.cwrap('mgba_run_frame', 'void', ['number']),
+                runFrame: Module.cwrap('mgba_run_frame', 'void', []),
                 getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', ['number']),
                 getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number', 'number']),
                 getAudioSampleRate: Module.cwrap('mgba_get_audio_sample_rate', 'number', ['number']),
@@ -173,10 +173,12 @@
 
         function startLoop() {
             function frame() {
+                // Run all active players in an interleaved fashion inside WASM
+                emulator.runFrame();
+                
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
                     if (p.active) {
-                        emulator.runFrame(i);
                         const bufferPtr = emulator.getVideoBuffer(i);
                         const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
                         p.imageData.data.set(videoData);
