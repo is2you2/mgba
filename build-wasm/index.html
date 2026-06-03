@@ -1,27 +1,44 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>mGBA WASM 4-Player Link Example</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; margin: 0; padding: 20px; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .player-box { 
-            background: white; 
-            padding: 10px; 
-            border-radius: 8px; 
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
-            display: flex; 
-            flex-direction: column; 
-            align-items: center; 
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .player-box {
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
             cursor: pointer;
             transition: all 0.2s ease;
             border: 3px solid transparent;
         }
+
         .player-box.focused {
             border-color: #007bff;
-            box-shadow: 0 0 15px rgba(0,123,255,0.3);
+            box-shadow: 0 0 15px rgba(0, 123, 255, 0.3);
             transform: scale(1.02);
         }
+
         canvas {
             image-rendering: pixelated;
             border: 2px solid #333;
@@ -29,21 +46,47 @@
             width: 480px;
             height: 320px;
         }
-        #controls-global { margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; width: 100%; max-width: 980px; box-sizing: border-box; }
-        .status-ready { color: green; font-weight: bold; }
-        .player-label { margin-bottom: 5px; font-weight: bold; color: #444; }
-        .player-box.focused .player-label { color: #007bff; }
-        .input-group { margin: 5px 0; }
+
+        #controls-global {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            width: 100%;
+            max-width: 980px;
+            box-sizing: border-box;
+        }
+
+        .status-ready {
+            color: green;
+            font-weight: bold;
+        }
+
+        .player-label {
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #444;
+        }
+
+        .player-box.focused .player-label {
+            color: #007bff;
+        }
+
+        .input-group {
+            margin: 5px 0;
+        }
     </style>
 </head>
+
 <body>
     <h1>mGBA 4-Player Local Link</h1>
-    
+
     <div id="controls-global">
         <span id="status">Loading WASM...</span>
         <button id="resume-audio" style="display:none">Enable Audio</button>
         <p style="font-size: 0.9em; color: #666; margin: 5px 0 0 0;">
-            Controls: Z (A), X (B), Shift (Select), Enter (Start), Arrows (D-Pad). <strong>Click a screen to control that player.</strong>
+            Controls: Z (A), X (B), Shift (Select), Enter (Start), Arrows (D-Pad). <strong>Click a screen to control
+                that player.</strong>
         </p>
     </div>
 
@@ -110,7 +153,7 @@
             const status = document.getElementById('status');
             status.innerText = 'WASM Loaded. Ready for ROMs.';
             status.className = 'status-ready';
-            
+
             emulator = {
                 init: Module.cwrap('mgba_init', 'number', []),
                 loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number', 'number']),
@@ -162,7 +205,7 @@
                     p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
                     p.active = true;
                     p.audioNextTime = audioContext.currentTime;
-                    
+
                     if (!window.loopStarted) {
                         window.loopStarted = true;
                         startLoop();
@@ -175,7 +218,7 @@
             function frame() {
                 // Run all active players in an interleaved fashion inside WASM
                 emulator.runFrame();
-                
+
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
                     if (p.active) {
@@ -199,11 +242,11 @@
                                 const source = audioContext.createBufferSource();
                                 source.buffer = audioBuffer;
                                 source.connect(audioContext.destination);
-                                
+
                                 const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
                                 source.start(playTime);
                                 p.audioNextTime = playTime + audioBuffer.duration;
-                                
+
                                 if (p.audioNextTime > audioContext.currentTime + 0.2) break;
                             }
                         }
@@ -234,4 +277,5 @@
         window.addEventListener('keyup', (e) => handleKey(e, 0));
     </script>
 </body>
+
 </html>
