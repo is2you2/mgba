@@ -119,27 +119,39 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
 
 EMSCRIPTEN_KEEPALIVE
 void mgba_run_frame() {
-    // Interleaved execution for all players to ensure sync
-    const int INTERLEAVE_CYCLES = 256;
-    const int CYCLES_PER_FRAME = 280896; // Standard GBA frame cycles
+    const uint32_t CYCLES_PER_FRAME = 280896;
+    uint32_t startCycles[MAX_PLAYERS];
+    bool active[MAX_PLAYERS];
     
-    for (int cycles = 0; cycles < CYCLES_PER_FRAME; cycles += INTERLEAVE_CYCLES) {
-        for (int i = 0; i < MAX_PLAYERS; i++) {
-            struct Player* p = &players[i];
-            if (p->core && !p->asleep) {
-                // Run in small increments
-                for (int sub = 0; sub < INTERLEAVE_CYCLES; sub++) {
-                    p->core->step(p->core);
-                    if (p->asleep) break;
-                }
-            }
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        struct Player* p = &players[i];
+        if (p->core) {
+            startCycles[i] = mTimingCurrentTime(p->core->timing);
+            active[i] = true;
+        } else {
+            active[i] = false;
         }
     }
 
-    // Post-frame processing for all active players
+    bool anyRunning;
+    do {
+        anyRunning = false;
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            struct Player* p = &players[i];
+            if (!active[i] || p->asleep) continue;
+
+            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
+            if (currentCycles - startCycles[i] < CYCLES_PER_FRAME) {
+                p->core->step(p->core);
+                anyRunning = true;
+            }
+        }
+    } while (anyRunning);
+
+    // Post-frame processing
     for (int i = 0; i < MAX_PLAYERS; i++) {
         struct Player* p = &players[i];
-        if (p->core && p->videoBuffer) {
+        if (active[i] && p->videoBuffer) {
             for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
                 p->videoBuffer[j] |= 0xFF000000;
             }
