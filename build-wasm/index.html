@@ -75,26 +75,18 @@
                 runFrame: Module.cwrap('mgba_run_frame', 'void', []),
                 getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', []),
                 getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number']),
+                getAudioSampleRate: Module.cwrap('mgba_get_audio_sample_rate', 'number', []),
                 getWidth: Module.cwrap('mgba_get_width', 'number', []),
                 getHeight: Module.cwrap('mgba_get_height', 'number', []),
                 setButton: Module.cwrap('mgba_set_button', 'void', ['number', 'number']),
             };
             emulator.init();
-            audioPtr = Module._malloc(AUDIO_BUFFER_SIZE * 2 * 2);
+            audioPtr = Module._malloc(AUDIO_BUFFER_SIZE * 2 * 2 * 4); // Increased buffer space
         });
 
         document.getElementById('rom-upload').addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file || !emulator) return;
-
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: AUDIO_SAMPLE_RATE
-                });
-                audioNextTime = audioContext.currentTime;
-            }
-
-            if (animationId) cancelAnimationFrame(animationId);
 
             const buffer = await file.arrayBuffer();
             const uint8Array = new Uint8Array(buffer);
@@ -104,6 +96,15 @@
             Module._free(ptr);
 
             if (success) {
+                const sampleRate = emulator.getAudioSampleRate() || AUDIO_SAMPLE_RATE;
+                if (!audioContext || audioContext.sampleRate !== sampleRate) {
+                    if (audioContext) audioContext.close();
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: sampleRate
+                    });
+                }
+                audioNextTime = audioContext.currentTime;
+
                 document.getElementById('status').innerText = 'Running: ' + file.name;
                 canvas.width = emulator.getWidth();
                 canvas.height = emulator.getHeight();
@@ -122,10 +123,11 @@
                 ctx.putImageData(imageData, 0, 0);
 
                 if (audioContext && audioContext.state === 'running') {
-                    const numSamples = emulator.getAudioSamples(audioPtr, AUDIO_BUFFER_SIZE);
-                    if (numSamples > 0) {
+                    // Pull all available samples to avoid buffer build-up
+                    let numSamples;
+                    while ((numSamples = emulator.getAudioSamples(audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
                         const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
-                        const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, AUDIO_SAMPLE_RATE);
+                        const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, audioContext.sampleRate);
                         const leftChannel = audioBuffer.getChannelData(0);
                         const rightChannel = audioBuffer.getChannelData(1);
                         for (let i = 0; i < numSamples / AUDIO_CHANNELS; i++) {
@@ -135,9 +137,15 @@
                         const source = audioContext.createBufferSource();
                         source.buffer = audioBuffer;
                         source.connect(audioContext.destination);
+                        
                         const playTime = Math.max(audioNextTime, audioContext.currentTime);
                         source.start(playTime);
                         audioNextTime = playTime + audioBuffer.duration;
+
+                        // If we are getting too far ahead, slow down a bit
+                        if (audioNextTime > audioContext.currentTime + 0.2) {
+                            break;
+                        }
                     }
                 } else if (audioContext && audioContext.state === 'suspended') {
                     document.getElementById('resume-audio').style.display = 'inline';

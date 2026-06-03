@@ -39,6 +39,8 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
     mCoreInitConfig(core, NULL);
     mCoreConfigSetDefaultValue(&core->config, "useBios", "no");
     mCoreConfigSetDefaultValue(&core->config, "skipBios", "yes");
+    mCoreConfigSetDefaultIntValue(&core->config, "volume", 256);
+    mCoreConfigSetDefaultValue(&core->config, "mute", "no");
     
     core->init(core);
     mCoreLoadConfig(core);
@@ -61,7 +63,7 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
         core->reloadConfigOption(core, "hwaccelVideo", NULL);
     }
 
-    core->setAudioBufferSize(core, 4096);
+    core->setAudioBufferSize(core, 16384);
     
     frameCount = 0;
     printf("WASM: ROM Loaded. Resolution: %ux%u\n", videoWidth, videoHeight);
@@ -96,6 +98,22 @@ int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
     if (available > maxSamples) available = maxSamples;
     mAudioBufferRead(audio, outBuffer, available);
     return (int)available;
+}
+
+EMSCRIPTEN_KEEPALIVE
+unsigned mgba_get_audio_sample_rate() {
+    if (!core) return 0;
+    return core->audioSampleRate(core);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_set_volume(int volume) {
+    if (core) {
+        core->opts.volume = volume;
+        if (core->reloadConfigOption) {
+            core->reloadConfigOption(core, "volume", NULL);
+        }
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE
