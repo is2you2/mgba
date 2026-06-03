@@ -74,7 +74,7 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     mCoreConfigSetDefaultValue(&p->core->config, "useBios", "no");
     mCoreConfigSetDefaultValue(&p->core->config, "skipBios", "yes");
     mCoreConfigSetDefaultIntValue(&p->core->config, "volume", 256);
-    mCoreConfigSetDefaultValue(&p->core->config, "mute", playerIndex == 0 ? "no" : "yes");
+    mCoreConfigSetDefaultValue(&p->core->config, "mute", "no");
     
     p->core->init(p->core);
     mCoreLoadConfig(p->core);

@@ -94,7 +94,6 @@
 
         // Audio state
         let audioContext = null;
-        let audioNextTime = 0;
         const AUDIO_CHANNELS = 2;
         const AUDIO_BUFFER_SIZE = 4096;
         let audioPtr = 0;
@@ -133,7 +132,8 @@
                     canvas: canvas,
                     ctx: canvas.getContext('2d'),
                     imageData: null,
-                    active: false
+                    active: false,
+                    audioNextTime: 0
                 };
             }
         });
@@ -146,7 +146,6 @@
 
                 if (!audioContext) {
                     audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    audioNextTime = audioContext.currentTime;
                 }
 
                 const buffer = await file.arrayBuffer();
@@ -162,6 +161,7 @@
                     p.canvas.height = emulator.getHeight(index);
                     p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
                     p.active = true;
+                    p.audioNextTime = audioContext.currentTime;
                     
                     if (!window.loopStarted) {
                         window.loopStarted = true;
@@ -174,18 +174,18 @@
         function startLoop() {
             function frame() {
                 for (let i = 0; i < MAX_PLAYERS; i++) {
-                    if (players[i].active) {
+                    const p = players[i];
+                    if (p.active) {
                         emulator.runFrame(i);
-                        const p = players[i];
                         const bufferPtr = emulator.getVideoBuffer(i);
                         const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
                         p.imageData.data.set(videoData);
                         p.ctx.putImageData(p.imageData, 0, 0);
 
-                        if (i === 0 && audioContext && audioContext.state === 'running') {
-                            const emulatorSampleRate = emulator.getAudioSampleRate(0) || 32768;
+                        if (audioContext && audioContext.state === 'running') {
+                            const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
                             let numSamples;
-                            while ((numSamples = emulator.getAudioSamples(0, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
+                            while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
                                 const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
                                 const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, emulatorSampleRate);
                                 const leftChannel = audioBuffer.getChannelData(0);
@@ -197,10 +197,12 @@
                                 const source = audioContext.createBufferSource();
                                 source.buffer = audioBuffer;
                                 source.connect(audioContext.destination);
-                                const playTime = Math.max(audioNextTime, audioContext.currentTime);
+                                
+                                const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
                                 source.start(playTime);
-                                audioNextTime = playTime + audioBuffer.duration;
-                                if (audioNextTime > audioContext.currentTime + 0.2) break;
+                                p.audioNextTime = playTime + audioBuffer.duration;
+                                
+                                if (p.audioNextTime > audioContext.currentTime + 0.2) break;
                             }
                         }
                     }
