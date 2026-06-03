@@ -4,8 +4,10 @@
 #include <mgba/core/config.h>
 #include <mgba/core/serialize.h>
 #include <mgba-util/vfs.h>
+#include <mgba-util/audio-buffer.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 static struct mCore* core = NULL;
 static uint32_t* videoBuffer = NULL;
@@ -43,6 +45,9 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
     videoBuffer = (uint32_t*)malloc(videoWidth * videoHeight * sizeof(uint32_t));
     core->setVideoBuffer(core, (mColor*)videoBuffer, videoWidth);
 
+    // Set audio sample rate
+    core->setAudioBufferSize(core, 2048);
+
     return 1;
 }
 
@@ -50,6 +55,12 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_frame() {
     if (core) {
         core->runFrame(core);
+        
+        // Fix Alpha channel: Ensure pixels are opaque (0xFF000000)
+        // mGBA often outputs 0x00RRGGBB, which is transparent in HTML5 Canvas
+        for (unsigned i = 0; i < videoWidth * videoHeight; ++i) {
+            videoBuffer[i] |= 0xFF000000;
+        }
     }
 }
 
@@ -59,45 +70,45 @@ uint32_t* mgba_get_video_buffer() {
 }
 
 EMSCRIPTEN_KEEPALIVE
-unsigned mgba_get_width() {
-    return videoWidth;
+int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
+    if (!core) return 0;
+    struct mAudioBuffer* audio = core->getAudioBuffer(core);
+    if (!audio) return 0;
+    
+    size_t available = mAudioBufferAvailable(audio);
+    if (available > maxSamples) available = maxSamples;
+    
+    mAudioBufferRead(audio, outBuffer, available);
+    return (int)available;
 }
 
 EMSCRIPTEN_KEEPALIVE
-unsigned mgba_get_height() {
-    return videoHeight;
-}
+unsigned mgba_get_width() { return videoWidth; }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned mgba_get_height() { return videoHeight; }
 
 EMSCRIPTEN_KEEPALIVE
 void mgba_set_button(int button, int pressed) {
     if (core) {
-        if (pressed) {
-            core->addKeys(core, 1 << button);
-        } else {
-            core->clearKeys(core, 1 << button);
-        }
+        if (pressed) core->addKeys(core, 1 << button);
+        else core->clearKeys(core, 1 << button);
     }
 }
 
 EMSCRIPTEN_KEEPALIVE
 uint8_t* mgba_save_state(size_t* outSize) {
     if (!core) return NULL;
-    
-    // Allocate a large enough buffer for the save state
-    size_t bufferSize = 2 * 1024 * 1024; // 2MB should be plenty
+    size_t bufferSize = 2 * 1024 * 1024;
     uint8_t* buffer = (uint8_t*)malloc(bufferSize);
     struct VFile* vf = VFileFromMemory(buffer, bufferSize);
-    
     if (!mCoreSaveStateNamed(core, vf, SAVESTATE_SCREENSHOT)) {
         vf->close(vf);
         free(buffer);
         return NULL;
     }
-    
     *outSize = vf->size(vf);
     vf->close(vf);
-    
-    // Return the buffer, JS is responsible for calling mgba_free_buffer
     return buffer;
 }
 
