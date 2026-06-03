@@ -96,12 +96,8 @@
             Module._free(ptr);
 
             if (success) {
-                const sampleRate = emulator.getAudioSampleRate() || AUDIO_SAMPLE_RATE;
-                if (!audioContext || audioContext.sampleRate !== sampleRate) {
-                    if (audioContext) audioContext.close();
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                        sampleRate: sampleRate
-                    });
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 }
                 audioNextTime = audioContext.currentTime;
 
@@ -123,11 +119,12 @@
                 ctx.putImageData(imageData, 0, 0);
 
                 if (audioContext && audioContext.state === 'running') {
+                    const emulatorSampleRate = emulator.getAudioSampleRate() || AUDIO_SAMPLE_RATE;
                     // Pull all available samples to avoid buffer build-up
                     let numSamples;
                     while ((numSamples = emulator.getAudioSamples(audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
                         const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
-                        const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, audioContext.sampleRate);
+                        const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, emulatorSampleRate);
                         const leftChannel = audioBuffer.getChannelData(0);
                         const rightChannel = audioBuffer.getChannelData(1);
                         for (let i = 0; i < numSamples / AUDIO_CHANNELS; i++) {

@@ -94,10 +94,12 @@ int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
     if (!core) return 0;
     struct mAudioBuffer* audio = core->getAudioBuffer(core);
     if (!audio) return 0;
-    size_t available = mAudioBufferAvailable(audio);
-    if (available > maxSamples) available = maxSamples;
-    mAudioBufferRead(audio, outBuffer, available);
-    return (int)available;
+    // maxSamples is the capacity of outBuffer in total int16_t elements.
+    // mAudioBufferAvailable and mAudioBufferRead work with stereo pairs.
+    size_t availablePairs = mAudioBufferAvailable(audio);
+    if (availablePairs * 2 > maxSamples) availablePairs = maxSamples / 2;
+    mAudioBufferRead(audio, outBuffer, availablePairs);
+    return (int)(availablePairs * 2);
 }
 
 EMSCRIPTEN_KEEPALIVE
