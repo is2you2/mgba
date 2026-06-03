@@ -27,7 +27,7 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
         core = NULL;
     }
 
-    struct VFile* vf = VFileFromMemory(buffer, size);
+    struct VFile* vf = VFileMemChunk(buffer, size);
     if (!vf) return 0;
 
     core = mCoreFindVF(vf);
@@ -37,13 +37,16 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
     }
 
     core->init(core);
-    
-    // Configure core options for HLE BIOS
     mCoreConfigSetDefaultValue(&core->config, "useBios", "no");
     mCoreConfigSetDefaultValue(&core->config, "skipBios", "yes");
     mCoreInitConfig(core, NULL);
 
-    core->loadROM(core, vf);
+    if (!core->loadROM(core, vf)) {
+        core->deinit(core);
+        core = NULL;
+        return 0;
+    }
+    
     core->reset(core);
 
     core->currentVideoSize(core, &videoWidth, &videoHeight);
@@ -55,7 +58,7 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
     core->setAudioBufferSize(core, 4096);
     
     frameCount = 0;
-    printf("WASM: ROM Loaded. %ux%u. HLE BIOS enabled.\n", videoWidth, videoHeight);
+    printf("WASM: ROM Loaded. Resolution: %ux%u\n", videoWidth, videoHeight);
 
     return 1;
 }
@@ -65,15 +68,8 @@ void mgba_run_frame() {
     if (core) {
         core->runFrame(core);
         frameCount++;
-
-        int nonZero = 0;
         for (unsigned i = 0; i < videoWidth * videoHeight; ++i) {
-            if (videoBuffer[i] & 0x00FFFFFF) nonZero++;
             videoBuffer[i] |= 0xFF000000;
-        }
-
-        if (frameCount % 60 == 0) {
-            printf("WASM: Frame %llu, Non-zero pixels: %d\n", frameCount, nonZero);
         }
     }
 }
@@ -88,10 +84,8 @@ int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
     if (!core) return 0;
     struct mAudioBuffer* audio = core->getAudioBuffer(core);
     if (!audio) return 0;
-    
     size_t available = mAudioBufferAvailable(audio);
     if (available > maxSamples) available = maxSamples;
-    
     mAudioBufferRead(audio, outBuffer, available);
     return (int)available;
 }
