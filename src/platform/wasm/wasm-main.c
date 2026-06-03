@@ -3,99 +3,144 @@
 #include <mgba/core/interface.h>
 #include <mgba/core/config.h>
 #include <mgba/core/serialize.h>
+#include <mgba/core/lockstep.h>
+#include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/sio.h>
+#include <mgba/internal/gba/sio/lockstep.h>
 #include <mgba-util/vfs.h>
 #include <mgba-util/audio-buffer.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-static struct mCore* core = NULL;
-static uint32_t* videoBuffer = NULL;
-static unsigned videoWidth = 0;
-static unsigned videoHeight = 0;
-static uint64_t frameCount = 0;
+#define MAX_PLAYERS 4
+
+struct Player {
+    struct mCore* core;
+    uint32_t* videoBuffer;
+    unsigned videoWidth;
+    unsigned videoHeight;
+    struct GBASIOLockstepDriver lockstepDriver;
+    struct mLockstepUser lockstepUser;
+};
+
+static struct Player players[MAX_PLAYERS];
+static struct GBASIOLockstepCoordinator coordinator;
+static bool coordinatorInitialized = false;
+
+// Mock lockstep user implementation for single-threaded WASM
+static void wasm_lockstep_sleep(struct mLockstepUser* user) {
+    // In a single-threaded environment, we don't actually sleep.
+    // The coordinator will handle the wait state.
+}
+
+static void wasm_lockstep_wake(struct mLockstepUser* user) {
+    // No-op for single-threaded
+}
 
 EMSCRIPTEN_KEEPALIVE
 int mgba_init() {
+    memset(players, 0, sizeof(players));
+    if (!coordinatorInitialized) {
+        GBASIOLockstepCoordinatorInit(&coordinator);
+        coordinatorInitialized = true;
+    }
     return 1;
 }
 
 EMSCRIPTEN_KEEPALIVE
-int mgba_load_rom(uint8_t* buffer, size_t size) {
-    if (core) {
-        core->deinit(core);
-        core = NULL;
+int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    struct Player* p = &players[playerIndex];
+
+    if (p->core) {
+        if (p->core->platform(p->core) == mPLATFORM_GBA) {
+            GBASIOLockstepCoordinatorDetach(&coordinator, &p->lockstepDriver);
+        }
+        p->core->deinit(p->core);
+        p->core = NULL;
     }
 
     struct VFile* vf = VFileMemChunk(buffer, size);
     if (!vf) return 0;
 
-    core = mCoreFindVF(vf);
-    if (!core) {
+    p->core = mCoreFindVF(vf);
+    if (!p->core) {
         vf->close(vf);
         return 0;
     }
 
-    mCoreInitConfig(core, NULL);
-    mCoreConfigSetDefaultValue(&core->config, "useBios", "no");
-    mCoreConfigSetDefaultValue(&core->config, "skipBios", "yes");
-    mCoreConfigSetDefaultIntValue(&core->config, "volume", 256);
-    mCoreConfigSetDefaultValue(&core->config, "mute", "no");
+    mCoreInitConfig(p->core, NULL);
+    mCoreConfigSetDefaultValue(&p->core->config, "useBios", "no");
+    mCoreConfigSetDefaultValue(&p->core->config, "skipBios", "yes");
+    mCoreConfigSetDefaultIntValue(&p->core->config, "volume", 256);
+    mCoreConfigSetDefaultValue(&p->core->config, "mute", playerIndex == 0 ? "no" : "yes");
     
-    core->init(core);
-    mCoreLoadConfig(core);
+    p->core->init(p->core);
+    mCoreLoadConfig(p->core);
 
-    if (!core->loadROM(core, vf)) {
-        core->deinit(core);
-        core = NULL;
+    if (!p->core->loadROM(p->core, vf)) {
+        p->core->deinit(p->core);
+        p->core = NULL;
         return 0;
     }
     
-    core->reset(core);
+    p->core->reset(p->core);
 
-    core->currentVideoSize(core, &videoWidth, &videoHeight);
-    if (videoBuffer) free(videoBuffer);
-    videoBuffer = (uint32_t*)malloc(videoWidth * videoHeight * sizeof(uint32_t));
-    memset(videoBuffer, 0, videoWidth * videoHeight * sizeof(uint32_t));
-    core->setVideoBuffer(core, (mColor*)videoBuffer, videoWidth);
+    p->core->currentVideoSize(p->core, &p->videoWidth, &p->videoHeight);
+    if (p->videoBuffer) free(p->videoBuffer);
+    p->videoBuffer = (uint32_t*)malloc(p->videoWidth * p->videoHeight * sizeof(uint32_t));
+    memset(p->videoBuffer, 0, p->videoWidth * p->videoHeight * sizeof(uint32_t));
+    p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffer, p->videoWidth);
     
-    if (core->reloadConfigOption) {
-        core->reloadConfigOption(core, "hwaccelVideo", NULL);
+    if (p->core->reloadConfigOption) {
+        p->core->reloadConfigOption(p->core, "hwaccelVideo", NULL);
     }
 
-    core->setAudioBufferSize(core, 16384);
-    
-    frameCount = 0;
-    printf("WASM: ROM Loaded. Resolution: %ux%u\n", videoWidth, videoHeight);
+    p->core->setAudioBufferSize(p->core, 16384);
 
+    // Setup Link Cable for GBA
+    if (p->core->platform(p->core) == mPLATFORM_GBA) {
+        p->lockstepUser.sleep = wasm_lockstep_sleep;
+        p->lockstepUser.wake = wasm_lockstep_wake;
+        GBASIOLockstepDriverCreate(&p->lockstepDriver, &p->lockstepUser);
+        GBASIOLockstepCoordinatorAttach(&coordinator, &p->lockstepDriver);
+        
+        struct GBA* gba = (struct GBA*)p->core->board;
+        GBASIOSetDriver(&gba->sio, &p->lockstepDriver.d);
+    }
+    
+    printf("WASM: Player %d ROM Loaded. Resolution: %ux%u\n", playerIndex, p->videoWidth, p->videoHeight);
     return 1;
 }
 
 EMSCRIPTEN_KEEPALIVE
-void mgba_run_frame() {
-    if (core) {
-        core->runFrame(core);
-        frameCount++;
-        if (videoBuffer) {
-            for (unsigned i = 0; i < videoWidth * videoHeight; ++i) {
-                videoBuffer[i] |= 0xFF000000;
+void mgba_run_frame(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+    if (p->core) {
+        p->core->runFrame(p->core);
+        if (p->videoBuffer) {
+            for (unsigned i = 0; i < p->videoWidth * p->videoHeight; ++i) {
+                p->videoBuffer[i] |= 0xFF000000;
             }
         }
     }
 }
 
 EMSCRIPTEN_KEEPALIVE
-uint32_t* mgba_get_video_buffer() {
-    return videoBuffer;
+uint32_t* mgba_get_video_buffer(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
+    return players[playerIndex].videoBuffer;
 }
 
 EMSCRIPTEN_KEEPALIVE
-int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
-    if (!core) return 0;
-    struct mAudioBuffer* audio = core->getAudioBuffer(core);
+int mgba_get_audio_samples(int playerIndex, int16_t* outBuffer, size_t maxSamples) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    struct Player* p = &players[playerIndex];
+    if (!p->core) return 0;
+    struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
     if (!audio) return 0;
-    // maxSamples is the capacity of outBuffer in total int16_t elements.
-    // mAudioBufferAvailable and mAudioBufferRead work with stereo pairs.
     size_t availablePairs = mAudioBufferAvailable(audio);
     if (availablePairs * 2 > maxSamples) availablePairs = maxSamples / 2;
     mAudioBufferRead(audio, outBuffer, availablePairs);
@@ -103,41 +148,56 @@ int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-unsigned mgba_get_audio_sample_rate() {
-    if (!core) return 0;
-    return core->audioSampleRate(core);
+unsigned mgba_get_audio_sample_rate(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    struct Player* p = &players[playerIndex];
+    if (!p->core) return 0;
+    return p->core->audioSampleRate(p->core);
 }
 
 EMSCRIPTEN_KEEPALIVE
-void mgba_set_volume(int volume) {
-    if (core) {
-        core->opts.volume = volume;
-        if (core->reloadConfigOption) {
-            core->reloadConfigOption(core, "volume", NULL);
+void mgba_set_volume(int playerIndex, int volume) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+    if (p->core) {
+        p->core->opts.volume = volume;
+        if (p->core->reloadConfigOption) {
+            p->core->reloadConfigOption(p->core, "volume", NULL);
         }
     }
 }
 
 EMSCRIPTEN_KEEPALIVE
-unsigned mgba_get_width() { return videoWidth; }
-EMSCRIPTEN_KEEPALIVE
-unsigned mgba_get_height() { return videoHeight; }
+unsigned mgba_get_width(int playerIndex) { 
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    return players[playerIndex].videoWidth; 
+}
 
 EMSCRIPTEN_KEEPALIVE
-void mgba_set_button(int button, int pressed) {
-    if (core) {
-        if (pressed) core->addKeys(core, 1 << button);
-        else core->clearKeys(core, 1 << button);
+unsigned mgba_get_height(int playerIndex) { 
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    return players[playerIndex].videoHeight; 
+}
+
+EMSCRIPTEN_KEEPALIVE
+void mgba_set_button(int playerIndex, int button, int pressed) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+    if (p->core) {
+        if (pressed) p->core->addKeys(p->core, 1 << button);
+        else p->core->clearKeys(p->core, 1 << button);
     }
 }
 
 EMSCRIPTEN_KEEPALIVE
-uint8_t* mgba_save_state(size_t* outSize) {
-    if (!core) return NULL;
+uint8_t* mgba_save_state(int playerIndex, size_t* outSize) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
+    struct Player* p = &players[playerIndex];
+    if (!p->core) return NULL;
     size_t bufferSize = 2 * 1024 * 1024;
     uint8_t* buffer = (uint8_t*)malloc(bufferSize);
     struct VFile* vf = VFileFromMemory(buffer, bufferSize);
-    if (!mCoreSaveStateNamed(core, vf, SAVESTATE_SCREENSHOT)) {
+    if (!mCoreSaveStateNamed(p->core, vf, SAVESTATE_SCREENSHOT)) {
         vf->close(vf);
         free(buffer);
         return NULL;
@@ -148,10 +208,12 @@ uint8_t* mgba_save_state(size_t* outSize) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-int mgba_load_state(uint8_t* buffer, size_t size) {
-    if (!core) return 0;
+int mgba_load_state(int playerIndex, uint8_t* buffer, size_t size) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    struct Player* p = &players[playerIndex];
+    if (!p->core) return 0;
     struct VFile* vf = VFileFromConstMemory(buffer, size);
-    bool success = mCoreLoadStateNamed(core, vf, SAVESTATE_SCREENSHOT);
+    bool success = mCoreLoadStateNamed(p->core, vf, SAVESTATE_SCREENSHOT);
     vf->close(vf);
     return success ? 1 : 0;
 }
