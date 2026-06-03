@@ -183,7 +183,6 @@
 
         document.querySelectorAll('.rom-upload').forEach(input => {
             input.addEventListener('change', async (e) => {
-                const index = parseInt(e.target.dataset.index);
                 const file = e.target.files[0];
                 if (!file || !emulator) return;
 
@@ -193,23 +192,26 @@
 
                 const buffer = await file.arrayBuffer();
                 const uint8Array = new Uint8Array(buffer);
-                const ptr = Module._malloc(uint8Array.length);
-                Module.HEAPU8.set(uint8Array, ptr);
-                const success = emulator.loadRom(index, ptr, uint8Array.length);
-                Module._free(ptr);
 
-                if (success) {
-                    const p = players[index];
-                    p.canvas.width = emulator.getWidth(index);
-                    p.canvas.height = emulator.getHeight(index);
-                    p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
-                    p.active = true;
-                    p.audioNextTime = audioContext.currentTime;
+                for (let index = 0; index < MAX_PLAYERS; index++) {
+                    const ptr = Module._malloc(uint8Array.length);
+                    Module.HEAPU8.set(uint8Array, ptr);
+                    const success = emulator.loadRom(index, ptr, uint8Array.length);
+                    Module._free(ptr);
 
-                    if (!window.loopStarted) {
-                        window.loopStarted = true;
-                        startLoop();
+                    if (success) {
+                        const p = players[index];
+                        p.canvas.width = emulator.getWidth(index);
+                        p.canvas.height = emulator.getHeight(index);
+                        p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
+                        p.active = true;
+                        p.audioNextTime = audioContext.currentTime;
                     }
+                }
+
+                if (!window.loopStarted) {
+                    window.loopStarted = true;
+                    startLoop();
                 }
             });
         });
