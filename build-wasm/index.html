@@ -244,12 +244,25 @@
                                 const source = audioContext.createBufferSource();
                                 source.buffer = audioBuffer;
                                 source.connect(audioContext.destination);
-
-                                const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
+                                // 오디오 큐가 너무 앞서가면 강제로 리셋
+                                const drift = p.audioNextTime - audioContext.currentTime;
+                                if (drift > 0.1 || drift < -0.1) {
+                                    p.audioNextTime = audioContext.currentTime;
+                                }
+                                const playTime = Math.max(
+                                    p.audioNextTime,
+                                    audioContext.currentTime
+                                );
                                 source.start(playTime);
                                 p.audioNextTime = playTime + audioBuffer.duration;
-
-                                if (p.audioNextTime > audioContext.currentTime + 0.2) break;
+                                // 메모리 정리
+                                source.onended = () => {
+                                    source.disconnect();
+                                };
+                                // 최대 100ms 정도만 선행 버퍼 유지
+                                if (p.audioNextTime > audioContext.currentTime + 0.1) {
+                                    break;
+                                }
                             }
                         }
                     }
