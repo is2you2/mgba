@@ -34,7 +34,7 @@ static struct Player players[MAX_PLAYERS];
 static struct GBASIOLockstepCoordinator coordinator;
 static bool coordinatorInitialized = false;
 
-// Mock lockstep user implementation for single-threaded WASM
+// 싱글 스레드 WASM 환경을 위한 락스텝 콜백 함수
 static void wasm_lockstep_sleep(struct mLockstepUser* user) {
     (void)user;
 }
@@ -102,9 +102,10 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
         p->core->reloadConfigOption(p->core, "hwaccelVideo", NULL);
     }
 
-    p->core->setAudioBufferSize(p->core, 16384);
+    // Web Audio JS단 버퍼(2048)와 동기화를 극대화하기 위해 버퍼 크기 축소 (지연 시간 해소)
+    p->core->setAudioBufferSize(p->core, 2048);
 
-    // Setup Link Cable for GBA
+    // GBA 링크 케이블 하드웨어 연동 설정
     if (p->core->platform(p->core) == mPLATFORM_GBA) {
         p->lockstepUser.sleep = wasm_lockstep_sleep;
         p->lockstepUser.wake = wasm_lockstep_wake;
@@ -232,8 +233,11 @@ uint8_t* mgba_save_state(int playerIndex, size_t* outSize) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
     struct Player* p = &players[playerIndex];
     if (!p->core) return NULL;
-    size_t bufferSize = 2 * 1024 * 1024;
+    
+    size_t bufferSize = 1024 * 1024; // 일반적인 GBA 세이브 상태는 1MB 내외로 충분
     uint8_t* buffer = (uint8_t*)malloc(bufferSize);
+    if (!buffer) return NULL;
+
     struct VFile* vf = VFileFromMemory(buffer, bufferSize);
     if (!mCoreSaveStateNamed(p->core, vf, SAVESTATE_SCREENSHOT)) {
         vf->close(vf);
@@ -242,7 +246,7 @@ uint8_t* mgba_save_state(int playerIndex, size_t* outSize) {
     }
     *outSize = vf->size(vf);
     vf->close(vf);
-    return buffer;
+    return buffer; 
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -256,7 +260,10 @@ int mgba_load_state(int playerIndex, uint8_t* buffer, size_t size) {
     return success ? 1 : 0;
 }
 
+// 중요: 외부 JS 환경에서 받아간 세이브 버퍼 포인터를 명시적으로 청소하기 위한 래퍼 함수
 EMSCRIPTEN_KEEPALIVE
 void mgba_free_buffer(void* ptr) {
-    free(ptr);
+    if (ptr) {
+        free(ptr);
+    }
 }
