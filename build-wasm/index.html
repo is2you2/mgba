@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>mGBA WASM Example</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; }
+        canvas {
+            image-rendering: pixelated;
+            border: 2px solid #333;
+            background: #000;
+            width: 480px;
+            height: 320px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        #controls { margin: 20px; padding: 10px; background: white; border-radius: 8px; }
+        .status-ready { color: green; }
+        .status-error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>mGBA WebAssembly</h1>
+    
+    <div id="controls">
+        <input type="file" id="rom-upload" accept=".gba,.gb,.gbc">
+        <span id="status">Loading WASM...</span>
+        <button id="resume-audio" style="display:none">Enable Audio</button>
+    </div>
+
+    <canvas id="screen"></canvas>
+    
+    <div style="margin-top: 20px; color: #666;">
+        Controls: Z (A), X (B), Shift (Select), Enter (Start), Arrows (D-Pad), A (L), S (R)
+    </div>
+
+    <script src="mgba.js"></script>
+    <script>
+        const GBA_KEYS = {
+            A: 0, B: 1, SELECT: 2, START: 3,
+            RIGHT: 4, LEFT: 5, UP: 6, DOWN: 7,
+            R: 8, L: 9
+        };
+
+        const KEY_MAP = {
+            'z': GBA_KEYS.A, 'x': GBA_KEYS.B,
+            'Shift': GBA_KEYS.SELECT, 'Enter': GBA_KEYS.START,
+            'ArrowRight': GBA_KEYS.RIGHT, 'ArrowLeft': GBA_KEYS.LEFT,
+            'ArrowUp': GBA_KEYS.UP, 'ArrowDown': GBA_KEYS.DOWN,
+            'a': GBA_KEYS.L, 's': GBA_KEYS.R
+        };
+
+        let Module = null;
+        let emulator = null;
+        let canvas = document.getElementById('screen');
+        let ctx = canvas.getContext('2d');
+        let imageData = null;
+        let animationId = null;
+
+        // Audio state
+        let audioContext = null;
+        let audioNextTime = 0;
+        const AUDIO_CHANNELS = 2;
+        const AUDIO_SAMPLE_RATE = 32768;
+        const AUDIO_BUFFER_SIZE = 4096;
+        let audioPtr = 0;
+
+        createMGBA().then(m => {
+            Module = m;
+            const status = document.getElementById('status');
+            status.innerText = 'WASM Loaded. Ready for ROM.';
+            status.className = 'status-ready';
+            
+            emulator = {
+                init: Module.cwrap('mgba_init', 'number', []),
+                loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number']),
+                runFrame: Module.cwrap('mgba_run_frame', 'void', []),
+                getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', []),
+                getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number']),
+                getWidth: Module.cwrap('mgba_get_width', 'number', []),
+                getHeight: Module.cwrap('mgba_get_height', 'number', []),
+                setButton: Module.cwrap('mgba_set_button', 'void', ['number', 'number']),
+            };
+            emulator.init();
+            audioPtr = Module._malloc(AUDIO_BUFFER_SIZE * 2 * 2);
+        });
+
+        document.getElementById('rom-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file || !emulator) return;
+
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: AUDIO_SAMPLE_RATE
+                });
+                audioNextTime = audioContext.currentTime;
+            }
+
+            if (animationId) cancelAnimationFrame(animationId);
+
+            const buffer = await file.arrayBuffer();
+            const uint8Array = new Uint8Array(buffer);
+            const ptr = Module._malloc(uint8Array.length);
+            Module.HEAPU8.set(uint8Array, ptr);
+            const success = emulator.loadRom(ptr, uint8Array.length);
+            Module._free(ptr);
+
+            if (success) {
+                document.getElementById('status').innerText = 'Running: ' + file.name;
+                canvas.width = emulator.getWidth();
+                canvas.height = emulator.getHeight();
+                imageData = ctx.createImageData(canvas.width, canvas.height);
+                startLoop();
+            }
+        });
+
+        function startLoop() {
+            function frame() {
+                emulator.runFrame();
+                
+                const bufferPtr = emulator.getVideoBuffer();
+                const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, canvas.width * canvas.height * 4);
+                imageData.data.set(videoData);
+                ctx.putImageData(imageData, 0, 0);
+
+                if (audioContext && audioContext.state === 'running') {
+                    const numSamples = emulator.getAudioSamples(audioPtr, AUDIO_BUFFER_SIZE);
+                    if (numSamples > 0) {
+                        const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
+                        const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, AUDIO_SAMPLE_RATE);
+                        const leftChannel = audioBuffer.getChannelData(0);
+                        const rightChannel = audioBuffer.getChannelData(1);
+                        for (let i = 0; i < numSamples / AUDIO_CHANNELS; i++) {
+                            leftChannel[i] = audioData[i * 2] / 32768.0;
+                            rightChannel[i] = audioData[i * 2 + 1] / 32768.0;
+                        }
+                        const source = audioContext.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(audioContext.destination);
+                        const playTime = Math.max(audioNextTime, audioContext.currentTime);
+                        source.start(playTime);
+                        audioNextTime = playTime + audioBuffer.duration;
+                    }
+                } else if (audioContext && audioContext.state === 'suspended') {
+                    document.getElementById('resume-audio').style.display = 'inline';
+                }
+                animationId = requestAnimationFrame(frame);
+            }
+            animationId = requestAnimationFrame(frame);
+        }
+
+        document.getElementById('resume-audio').addEventListener('click', () => {
+            if (audioContext) {
+                audioContext.resume();
+                document.getElementById('resume-audio').style.display = 'none';
+            }
+        });
+
+        const handleKey = (e, pressed) => {
+            if (emulator && KEY_MAP[e.key] !== undefined) {
+                emulator.setButton(KEY_MAP[e.key], pressed);
+                e.preventDefault();
+            }
+        };
+        window.addEventListener('keydown', (e) => handleKey(e, 1));
+        window.addEventListener('keyup', (e) => handleKey(e, 0));
+    </script>
+</body>
+</html>

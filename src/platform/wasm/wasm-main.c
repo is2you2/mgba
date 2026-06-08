@@ -13,6 +13,7 @@ static struct mCore* core = NULL;
 static uint32_t* videoBuffer = NULL;
 static unsigned videoWidth = 0;
 static unsigned videoHeight = 0;
+static uint64_t frameCount = 0;
 
 EMSCRIPTEN_KEEPALIVE
 int mgba_init() {
@@ -36,17 +37,25 @@ int mgba_load_rom(uint8_t* buffer, size_t size) {
     }
 
     core->init(core);
+    
+    // Configure core options for HLE BIOS
+    mCoreConfigSetDefaultValue(&core->config, "useBios", "no");
+    mCoreConfigSetDefaultValue(&core->config, "skipBios", "yes");
     mCoreInitConfig(core, NULL);
+
     core->loadROM(core, vf);
     core->reset(core);
 
     core->currentVideoSize(core, &videoWidth, &videoHeight);
     if (videoBuffer) free(videoBuffer);
     videoBuffer = (uint32_t*)malloc(videoWidth * videoHeight * sizeof(uint32_t));
+    memset(videoBuffer, 0, videoWidth * videoHeight * sizeof(uint32_t));
     core->setVideoBuffer(core, (mColor*)videoBuffer, videoWidth);
 
-    // Set audio sample rate
-    core->setAudioBufferSize(core, 2048);
+    core->setAudioBufferSize(core, 4096);
+    
+    frameCount = 0;
+    printf("WASM: ROM Loaded. %ux%u. HLE BIOS enabled.\n", videoWidth, videoHeight);
 
     return 1;
 }
@@ -55,11 +64,16 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_frame() {
     if (core) {
         core->runFrame(core);
-        
-        // Fix Alpha channel: Ensure pixels are opaque (0xFF000000)
-        // mGBA often outputs 0x00RRGGBB, which is transparent in HTML5 Canvas
+        frameCount++;
+
+        int nonZero = 0;
         for (unsigned i = 0; i < videoWidth * videoHeight; ++i) {
+            if (videoBuffer[i] & 0x00FFFFFF) nonZero++;
             videoBuffer[i] |= 0xFF000000;
+        }
+
+        if (frameCount % 60 == 0) {
+            printf("WASM: Frame %llu, Non-zero pixels: %d\n", frameCount, nonZero);
         }
     }
 }
@@ -84,7 +98,6 @@ int mgba_get_audio_samples(int16_t* outBuffer, size_t maxSamples) {
 
 EMSCRIPTEN_KEEPALIVE
 unsigned mgba_get_width() { return videoWidth; }
-
 EMSCRIPTEN_KEEPALIVE
 unsigned mgba_get_height() { return videoHeight; }
 
