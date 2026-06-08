@@ -67,6 +67,9 @@ struct GBASIOLockstepPlayer {
 	struct GBASIOLockstepEvent* queue;
 	bool dataReceived;
 
+	uint16_t multiData[4];
+	uint32_t normalData[4];
+
 	struct GBASIOLockstepEvent buffer[MAX_LOCKSTEP_EVENTS];
 	struct GBASIOLockstepEvent* freeList;
 };

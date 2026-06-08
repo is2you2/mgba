@@ -6,6 +6,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include <mgba/internal/gba/sio/lockstep.h>
 
+#include <string.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/io.h>
 
@@ -331,6 +332,22 @@ static bool GBASIOLockstepDriverLoadState(struct GBASIODriver* driver, const voi
 	LOAD_32LE(player->cycleOffset, 0, &state->player.cycleOffset);
 	player->dataReceived = GBASIOLockstepSerializedFlagsGetDataReceived(flags);
 	player->mode = _modeIntToEnum(GBASIOLockstepSerializedFlagsGetDriverMode(flags));
+	{
+		unsigned i;
+		for (i = 0; i < 4; ++i) {
+			LOAD_32LE(player->normalData[i], 0, &state->driver.reservedDriver[i]);
+		}
+	}
+	LOAD_16LE(player->multiData[0], 0, (uint16_t*) &state->player.reservedPlayer[0]);
+	LOAD_16LE(player->multiData[1], 2, (uint16_t*) &state->player.reservedPlayer[0]);
+	LOAD_16LE(player->multiData[2], 0, (uint16_t*) &state->player.reservedPlayer[1]);
+	LOAD_16LE(player->multiData[3], 2, (uint16_t*) &state->player.reservedPlayer[1]);
+
+	// Recovery for old save states
+	if (player->dataReceived && !player->multiData[0] && !player->multiData[1] && !player->multiData[2] && !player->multiData[3]) {
+		memcpy(player->multiData, coordinator->multiData, sizeof(player->multiData));
+		memcpy(player->normalData, coordinator->normalData, sizeof(player->normalData));
+	}
 
 	player->otherModes[0] = _modeIntToEnum(GBASIOLockstepSerializedFlagsGetPlayer0Mode(flags));
 	player->otherModes[1] = _modeIntToEnum(GBASIOLockstepSerializedFlagsGetPlayer1Mode(flags));
@@ -419,6 +436,17 @@ static void GBASIOLockstepDriverSaveState(struct GBASIODriver* driver, void** st
 
 	MutexLock(&coordinator->mutex);
 	struct GBASIOLockstepPlayer* player = TableLookup(&coordinator->players, lockstep->lockstepId);
+	{
+		size_t i;
+		for (i = 0; i < 4; ++i) {
+			STORE_32LE(player->normalData[i], 0, &state->driver.reservedDriver[i]);
+		}
+	}
+	STORE_16LE(player->multiData[0], 0, (uint16_t*) &state->player.reservedPlayer[0]);
+	STORE_16LE(player->multiData[1], 2, (uint16_t*) &state->player.reservedPlayer[0]);
+	STORE_16LE(player->multiData[2], 0, (uint16_t*) &state->player.reservedPlayer[1]);
+	STORE_16LE(player->multiData[3], 2, (uint16_t*) &state->player.reservedPlayer[1]);
+
 	GBASIOLockstepSerializedFlags flags = 0;
 	STORE_32LE(player->playerId, 0, &state->player.playerId);
 	STORE_32LE(player->cycleOffset, 0, &state->player.cycleOffset);
@@ -588,11 +616,11 @@ static void GBASIOLockstepDriverFinishMultiplayer(struct GBASIODriver* driver, u
 			memset(data, 0xFF, sizeof(uint16_t) * 4);
 		} else {
 			mLOG(GBA_SIO, DEBUG, "MULTI transfer finished: %04X %04X %04X %04X",
-			     coordinator->multiData[0],
-			     coordinator->multiData[1],
-			     coordinator->multiData[2],
-			     coordinator->multiData[3]);
-			memcpy(data, coordinator->multiData, sizeof(uint16_t) * 4);
+			     player->multiData[0],
+			     player->multiData[1],
+			     player->multiData[2],
+			     player->multiData[3]);
+			memcpy(data, player->multiData, sizeof(uint16_t) * 4);
 		}
 		player->dataReceived = false;
 		if (player->playerId == 0) {
@@ -613,7 +641,7 @@ static uint8_t GBASIOLockstepDriverFinishNormal8(struct GBASIODriver* driver) {
 			if (!player->dataReceived) {
 				mLOG(GBA_SIO, WARN, "NORMAL did not receive data. Are we running behind?");
 			} else {
-				data = coordinator->normalData[player->playerId - 1];
+				data = player->normalData[player->playerId - 1];
 				mLOG(GBA_SIO, DEBUG, "NORMAL8 transfer finished: %02X", data);
 			}
 		}
@@ -637,7 +665,7 @@ static uint32_t GBASIOLockstepDriverFinishNormal32(struct GBASIODriver* driver) 
 			if (!player->dataReceived) {
 				mLOG(GBA_SIO, WARN, "Did not receive data. Are we running behind?");
 			} else {
-				data = coordinator->normalData[player->playerId - 1];
+				data = player->normalData[player->playerId - 1];
 				mLOG(GBA_SIO, DEBUG, "NORMAL32 transfer finished: %08X", data);
 			}
 		}
@@ -1069,8 +1097,10 @@ void GBASIOLockstepCoordinatorAckPlayer(struct GBASIOLockstepCoordinator* coordi
 				if (!coordinator->attachedPlayers[i]) {
 					continue;
 				}
-				struct GBASIOLockstepPlayer* player = TableLookup(&coordinator->players, coordinator->attachedPlayers[i]);
-				player->dataReceived = true;
+				struct GBASIOLockstepPlayer* p = TableLookup(&coordinator->players, coordinator->attachedPlayers[i]);
+				p->dataReceived = true;
+				memcpy(p->multiData, coordinator->multiData, sizeof(p->multiData));
+				memcpy(p->normalData, coordinator->normalData, sizeof(p->normalData));
 			}
 
 			coordinator->transferActive = false;
