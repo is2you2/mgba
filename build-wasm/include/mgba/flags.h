@@ -30,7 +30,7 @@
 #endif
 
 #ifndef DISABLE_THREADING
-/* #undef DISABLE_THREADING */
+#define DISABLE_THREADING
 #endif
 
 #ifndef FIXED_ROM_BUFFER
