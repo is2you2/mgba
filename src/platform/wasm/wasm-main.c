@@ -123,14 +123,14 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
 
 EMSCRIPTEN_KEEPALIVE
 void mgba_run_frame() {
-    const uint32_t CYCLES_PER_FRAME = 280896;
-    uint32_t startCycles[MAX_PLAYERS];
+    const uint32_t CYCLES_PER_FRAME = 280896; // GBA 1프레임당 표준 하드웨어 클럭 수
+    uint32_t targetCycles[MAX_PLAYERS];
     bool active[MAX_PLAYERS];
     
     for (int i = 0; i < MAX_PLAYERS; i++) {
         struct Player* p = &players[i];
         if (p->core) {
-            startCycles[i] = mTimingCurrentTime(p->core->timing);
+            targetCycles[i] = mTimingCurrentTime(p->core->timing) + CYCLES_PER_FRAME;
             active[i] = true;
         } else {
             active[i] = false;
@@ -138,6 +138,7 @@ void mgba_run_frame() {
     }
 
     bool anyRunning;
+    const uint32_t CHUNK_SIZE = CYCLES_PER_FRAME;
     do {
         anyRunning = false;
         for (int i = 0; i < MAX_PLAYERS; i++) {
