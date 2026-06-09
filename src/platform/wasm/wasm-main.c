@@ -22,7 +22,6 @@ struct Player {
     unsigned videoHeight;
     struct GBASIOLockstepDriver lockstepDriver;
     struct mLockstepUser lockstepUser;
-    bool asleep;
 };
 
 static struct Player players[MAX_PLAYERS];
@@ -31,13 +30,11 @@ static bool coordinatorInitialized = false;
 
 // Mock lockstep user implementation for single-threaded WASM
 static void wasm_lockstep_sleep(struct mLockstepUser* user) {
-    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
-    p->asleep = true;
+    (void)user;
 }
 
 static void wasm_lockstep_wake(struct mLockstepUser* user) {
-    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
-    p->asleep = false;
+    (void)user;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -112,8 +109,8 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
         GBASIOSetDriver(&gba->sio, &p->lockstepDriver.d);
     }
     
-    p->asleep = false;
-    printf("WASM: Player %d ROM Loaded. Resolution: %ux%u\n", playerIndex, p->videoWidth, p->videoHeight);
+    p->lockstepDriver.asleep = false;
+    printf("WASM: Player %d ROM Loaded Successfully. Res: %ux%u\n", playerIndex, p->videoWidth, p->videoHeight);
     return 1;
 }
 
@@ -138,11 +135,15 @@ void mgba_run_frame() {
         anyRunning = false;
         for (int i = 0; i < MAX_PLAYERS; i++) {
             struct Player* p = &players[i];
-            if (!active[i] || p->asleep) continue;
+            if (!active[i] || p->lockstepDriver.asleep) continue;
 
             uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
-            if (currentCycles - startCycles[i] < CYCLES_PER_FRAME) {
-                p->core->step(p->core);
+            int32_t remaining = (int32_t)(targetCycles[i] - currentCycles);
+            if (remaining > 0) {
+                uint32_t endCycles = currentCycles + (remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining);
+                while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                    p->core->step(p->core);
+                }
                 anyRunning = true;
             }
         }

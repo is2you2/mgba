@@ -63,7 +63,6 @@ struct GBASIOLockstepPlayer {
 	int playerId;
 	enum GBASIOMode mode;
 	enum GBASIOMode otherModes[MAX_GBAS];
-	bool asleep;
 	int32_t cycleOffset;
 	struct GBASIOLockstepEvent* queue;
 	bool dataReceived;
@@ -79,6 +78,7 @@ struct GBASIOLockstepDriver {
 	unsigned lockstepId;
 
 	struct mLockstepUser* user;
+	bool asleep;
 };
 
 void GBASIOLockstepCoordinatorInit(struct GBASIOLockstepCoordinator*);

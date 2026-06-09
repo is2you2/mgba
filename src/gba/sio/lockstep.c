@@ -126,7 +126,7 @@ static void _verifyAwake(struct GBASIOLockstepCoordinator* coordinator) {
 			continue;
 		}
 		struct GBASIOLockstepPlayer* player = TableLookup(&coordinator->players, coordinator->attachedPlayers[i]);
-		asleep += player->asleep;
+		asleep += player->driver->asleep;
 	}
 	mASSERT_DEBUG(!asleep || asleep < coordinator->nAttached);
 #endif
@@ -239,13 +239,13 @@ static void GBASIOLockstepDriverReset(struct GBASIODriver* driver) {
 
 	if (coordinator->transferActive) {
 		_abortTransfer(coordinator, player);
-		player->asleep = false;
+		player->driver->asleep = false;
 	}
 	if (player->playerId == 0 && coordinator->nAttached > 1) {
 		coordinator->waiting = 0;
 		// We will immediately go back to sleep when the initial mode gets set,
 		// so we need to clear this here to avoid triggering an assert later.
-		player->asleep = false;
+		player->driver->asleep = false;
 		GBASIOLockstepCoordinatorWakePlayers(coordinator);
 	}
 
@@ -343,15 +343,15 @@ static bool GBASIOLockstepDriverLoadState(struct GBASIODriver* driver, const voi
 	}
 
 	if (GBASIOLockstepSerializedFlagsGetAsleep(flags)) {
-		if (!player->asleep && player->driver->user->sleep) {
+		if (!player->driver->asleep && player->driver->user->sleep) {
 			player->driver->user->sleep(player->driver->user);
 		}
-		player->asleep = true;
+		player->driver->asleep = true;
 	} else {
-		if (player->asleep && player->driver->user->wake) {
+		if (player->driver->asleep && player->driver->user->wake) {
 			player->driver->user->wake(player->driver->user);
 		}
-		player->asleep = false;
+		player->driver->asleep = false;
 	}
 
 	unsigned i;
@@ -421,7 +421,7 @@ static void GBASIOLockstepDriverSaveState(struct GBASIODriver* driver, void** st
 	GBASIOLockstepSerializedFlags flags = 0;
 	STORE_32LE(player->playerId, 0, &state->player.playerId);
 	STORE_32LE(player->cycleOffset, 0, &state->player.cycleOffset);
-	flags = GBASIOLockstepSerializedFlagsSetAsleep(flags, player->asleep);
+	flags = GBASIOLockstepSerializedFlagsSetAsleep(flags, player->driver->asleep);
 	flags = GBASIOLockstepSerializedFlagsSetDataReceived(flags, player->dataReceived);
 	flags = GBASIOLockstepSerializedFlagsSetDriverMode(flags, _modeEnumToInt(player->mode));
 	flags = GBASIOLockstepSerializedFlagsSetEventScheduled(flags, mTimingIsScheduled(&driver->p->p->timing, &lockstep->event));
@@ -1021,7 +1021,7 @@ int32_t GBASIOLockstepTime(struct GBASIOLockstepPlayer* player) {
 
 void GBASIOLockstepCoordinatorWaitOnPlayers(struct GBASIOLockstepCoordinator* coordinator, struct GBASIOLockstepPlayer* player) {
 	mASSERT_LOG(GBA_SIO, !coordinator->waiting, "Multiplayer desynchronized: coordinator still waiting");
-	mASSERT_LOG(GBA_SIO, !player->asleep, "Multiplayer desynchronized: player asleep");
+	mASSERT_LOG(GBA_SIO, !player->driver->asleep, "Multiplayer desynchronized: player asleep");
 	mASSERT_LOG(GBA_SIO, player->playerId == 0, "Multiplayer desynchronized: invalid player %i attempting to coordinate", player->playerId);
 	if (coordinator->nAttached < 2) {
 		return;
@@ -1048,10 +1048,10 @@ void GBASIOLockstepCoordinatorWakePlayers(struct GBASIOLockstepCoordinator* coor
 }
 
 void GBASIOLockstepPlayerWake(struct GBASIOLockstepPlayer* player) {
-	if (!player->asleep) {
+	if (!player->driver->asleep) {
 		return;
 	}
-	player->asleep = false;
+	player->driver->asleep = false;
 	player->driver->user->wake(player->driver->user);
 }
 
@@ -1082,10 +1082,10 @@ void GBASIOLockstepCoordinatorAckPlayer(struct GBASIOLockstepCoordinator* coordi
 }
 
 void GBASIOLockstepPlayerSleep(struct GBASIOLockstepPlayer* player) {
-	if (player->asleep) {
+	if (player->driver->asleep) {
 		return;
 	}
-	player->asleep = true;
+	player->driver->asleep = true;
 	player->driver->user->sleep(player->driver->user);
 	player->driver->d.p->p->cpu->nextEvent = 0;
 	GBAInterrupt(player->driver->d.p->p);
