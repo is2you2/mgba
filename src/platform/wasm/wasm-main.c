@@ -28,6 +28,7 @@ struct Player {
     unsigned videoHeight;
     struct GBASIOLockstepDriver lockstepDriver;
     struct mLockstepUser lockstepUser;
+    uint16_t inputState;
 };
 
 static struct Player players[MAX_PLAYERS];
@@ -132,6 +133,9 @@ void mgba_run_frame() {
         if (p->core) {
             targetCycles[i] = mTimingCurrentTime(p->core->timing) + CYCLES_PER_FRAME;
             active[i] = true;
+            // 키 입력처리
+            p->core->clearKeys(p->core, 0x3FF);
+            p->core->addKeys(p->core, p->inputState);
         } else {
             active[i] = false;
         }
@@ -221,12 +225,11 @@ unsigned mgba_get_height(int playerIndex) {
 
 EMSCRIPTEN_KEEPALIVE
 void mgba_set_button(int playerIndex, int button, int pressed) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    if (p->core) {
-        if (pressed) p->core->addKeys(p->core, 1 << button);
-        else p->core->clearKeys(p->core, 1 << button);
-    }
+    if (pressed)
+        p->inputState |= (1 << button);
+    else
+        p->inputState &= ~(1 << button);
 }
 
 EMSCRIPTEN_KEEPALIVE
