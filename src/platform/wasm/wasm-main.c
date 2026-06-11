@@ -181,7 +181,7 @@ void mgba_run_frame() {
     }
 
     bool anyRunning;
-    const uint32_t CHUNK_SIZE = 1024; // 동기화 정밀도를 위해 청크 크기 축소 (기존: CYCLES_PER_FRAME)
+    const uint32_t CHUNK_SIZE = CYCLES_PER_FRAME;
     do {
         anyRunning = false;
         for (int i = 0; i < MAX_PLAYERS; i++) {
