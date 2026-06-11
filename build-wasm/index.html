@@ -162,6 +162,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             emulator = {
                 init: Module.cwrap('mgba_init', 'number', []),
                 loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number', 'number']),
+                syncBoot: Module.cwrap('mgba_sync_boot', 'void', []),
                 runFrame: Module.cwrap('mgba_run_frame', 'void', []),
                 getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', ['number']),
                 getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number', 'number']),
@@ -213,6 +214,9 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                         p.audioNextTime = audioContext.currentTime;
                     }
                 }
+
+                // 모든 플레이어 로드 후 동기화 부팅 수행
+                emulator.syncBoot();
 
                 if (!window.loopStarted) {
                     window.loopStarted = true;

@@ -123,6 +123,45 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+void mgba_sync_boot() {
+    // 부팅 초기 약 20,000 사이클 동안 매우 조밀한 인터리빙 수행 (SIO 핸드셰이크 안정화)
+    const uint32_t BOOT_SYNC_CYCLES = 20000;
+    uint32_t targetCycles[MAX_PLAYERS];
+    bool active[MAX_PLAYERS];
+    
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        struct Player* p = &players[i];
+        if (p->core) {
+            targetCycles[i] = mTimingCurrentTime(p->core->timing) + BOOT_SYNC_CYCLES;
+            active[i] = true;
+        } else {
+            active[i] = false;
+        }
+    }
+
+    bool anyRunning;
+    const uint32_t BOOT_CHUNK_SIZE = 64; // 부팅 시에는 매우 작은 단위로 교차 실행
+    do {
+        anyRunning = false;
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            struct Player* p = &players[i];
+            if (!active[i] || p->lockstepDriver.asleep) continue;
+
+            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
+            int32_t remaining = (int32_t)(targetCycles[i] - currentCycles);
+            if (remaining > 0) {
+                uint32_t endCycles = currentCycles + (remaining > BOOT_CHUNK_SIZE ? BOOT_CHUNK_SIZE : remaining);
+                while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                    p->core->step(p->core);
+                }
+                anyRunning = true;
+            }
+        }
+    } while (anyRunning);
+    printf("WASM: Sync Boot Completed.\n");
+}
+
+EMSCRIPTEN_KEEPALIVE
 void mgba_run_frame() {
     const uint32_t CYCLES_PER_FRAME = 280896; // GBA 1프레임당 표준 하드웨어 클럭 수
     uint32_t targetCycles[MAX_PLAYERS];
@@ -142,7 +181,7 @@ void mgba_run_frame() {
     }
 
     bool anyRunning;
-    const uint32_t CHUNK_SIZE = CYCLES_PER_FRAME;
+    const uint32_t CHUNK_SIZE = 1024; // 동기화 정밀도를 위해 청크 크기 축소 (기존: CYCLES_PER_FRAME)
     do {
         anyRunning = false;
         for (int i = 0; i < MAX_PLAYERS; i++) {
