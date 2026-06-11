@@ -1,0 +1,16 @@
+{
+  "name": "relaywss",
+  "version": "1.0.0",
+  "description": "",
+  "license": "MIT",
+  "author": "liss22",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "uuid": "^14.0.0",
+    "ws": "^8.21.0"
+  }
+}
