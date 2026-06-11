@@ -1,16 +1,20 @@
 const express = require('express');
-const cors = require('cors');
 const path = require('path');
 
 const app = express();
 const port = 8100;
 
-app.use(cors());
+// SharedArrayBuffer 활성화용 헤더
+app.use((req, res, next) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    next();
+});
 
 app.use(express.static(__dirname, {
-    setHeaders: (res, path) => {
-        if (path.endsWith('.wasm')) {
-            res.set('Content-Type', 'application/wasm');
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.wasm')) {
+            res.setHeader('Content-Type', 'application/wasm');
         }
     }
 }));
