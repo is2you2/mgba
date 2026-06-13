@@ -1,7 +1,7 @@
 const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 
-const port = 8080;
+const port = 4000;
 
 const wss = new WebSocket.Server({
     port: port,
@@ -33,7 +33,7 @@ function send(ws, data) {
     }
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
     const clientUuid = uuidv4();
 
     clients.set(clientUuid, {
@@ -56,11 +56,13 @@ wss.on("connection", (ws) => {
             return;
         }
 
+
         switch (msg.type) {
             case "join":
+                // 로컬망 빠른 연결을 위해 발송자 ip주소를 수집
+                msg['senderAddr'] = req.socket.remoteAddress;
                 handleJoin(clientUuid, msg);
                 break;
-
             case "msg":
                 handlePrivateMessage(clientUuid, msg);
                 break;
@@ -85,6 +87,7 @@ function handleJoin(clientUuid, msg) {
     if (!room) {
         room = {
             host: clientUuid,
+            data: msg.data,
             clients: new Set(),
         };
 
@@ -101,7 +104,24 @@ function handleJoin(clientUuid, msg) {
         roomId,
         host: room.host,
         isHost: room.host === clientUuid,
+        data: room.data,
     });
+
+    // 참여자라면 방장에게도 메시지 발송
+    if (room.host != clientUuid) {
+        const hostClient = clients.get(room.host);
+        if (hostClient) {
+            send(hostClient.ws, {
+                type: "msg",
+                from: clientUuid,
+                data: {
+                    type: "joined",
+                    roomId,
+                    senderAddr: msg['senderAddr'],
+                }
+            });
+        }
+    }
 }
 
 function handlePrivateMessage(senderUuid, msg) {
@@ -153,28 +173,25 @@ function handleDisconnect(clientUuid) {
         const room = rooms.get(roomId);
 
         if (room) {
-            room.clients.delete(clientUuid);
-
-            // host 나가면 첫 번째 사용자에게 host 위임
             if (room.host === clientUuid) {
-                const nextHost = room.clients.values().next().value;
-
-                if (nextHost) {
-                    room.host = nextHost;
-
-                    for (const memberId of room.clients) {
-                        const member = clients.get(memberId);
-
+                // 방장이 나가면 모든 클라이언트 퇴출
+                for (const memberId of room.clients) {
+                    const member = clients.get(memberId);
+                    if (member) {
                         send(member.ws, {
-                            type: "hostChanged",
-                            host: nextHost,
+                            type: "roomClosed",
+                            message: "방장이 나가서 방이 종료되었습니다.",
                         });
                     }
-                } else {
+                }
+                rooms.delete(roomId);
+            } else {
+                // 방장이 아닌 경우 단순히 클라이언트 제거
+                room.clients.delete(clientUuid);
+
+                if (room.clients.size === 0) {
                     rooms.delete(roomId);
                 }
-            } else if (room.clients.size === 0) {
-                rooms.delete(roomId);
             }
         }
     }
