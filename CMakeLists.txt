@@ -10,9 +10,8 @@ if(POLICY CMP0072)
 endif()
 
 if(EMSCRIPTEN)
-	set(DISABLE_THREADING ON CACHE BOOL "Disable multi-threading" FORCE)
-	set(USE_PTHREADS OFF CACHE BOOL "Disable pthreads" FORCE)
-	add_definitions(-DDISABLE_THREADING)
+	set(DISABLE_THREADING OFF CACHE BOOL "Disable multi-threading" FORCE)
+	set(USE_PTHREADS ON CACHE BOOL "Disable pthreads" FORCE)
 endif()
 
 project(mGBA)
