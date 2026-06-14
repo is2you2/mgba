@@ -58,9 +58,9 @@ void mgba_run_player(int playerIndex) {
         }
 
         if (p->core) {
-            // 오디오 버퍼가 너무 가득 차면 잠시 대기하여 CPU 점유율 조절 (스로틀링)
+            // 오디오 버퍼가 일정 수준 이상 차면 잠시 대기하여 실행 속도 조절 (Throttling)
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > 8192) {
+            if (audio && mAudioBufferAvailable(audio) > 2048) {
                 pthread_mutex_unlock(&p->mutex);
                 emscripten_thread_sleep(1); 
                 continue;
@@ -69,10 +69,10 @@ void mgba_run_player(int playerIndex) {
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
 
-            // 200 사이클씩 실행하여 뮤텍스 오버헤드 감소
-            for (int i = 0; i < 200; ++i) {
+            // 100 사이클씩 실행하여 뮤텍스 오버헤드와 속도 조절 사이의 균형을 맞춤
+            for (int i = 0; i < 100; ++i) {
                 p->core->step(p->core);
-                if (p->lockstepDriver.asleep) break; // 실행 중 잠들면 즉시 중단
+                if (p->lockstepDriver.asleep) break; 
             }
             pthread_mutex_unlock(&p->mutex);
         } else {
@@ -158,6 +158,8 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     mCoreInitConfig(p->core, NULL);
     mCoreConfigSetDefaultValue(&p->core->config, "useBios", "no");
     mCoreConfigSetDefaultValue(&p->core->config, "skipBios", "yes");
+    mCoreConfigSetDefaultValue(&p->core->config, "audioSync", "yes");
+    mCoreConfigSetDefaultValue(&p->core->config, "fpsTarget", "60");
     mCoreConfigSetDefaultIntValue(&p->core->config, "volume", 256);
     mCoreConfigSetDefaultValue(&p->core->config, "mute", "no");
 
@@ -183,7 +185,7 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
         p->core->reloadConfigOption(p->core, "hwaccelVideo", NULL);
     }
 
-    p->core->setAudioBufferSize(p->core, 2048);
+    p->core->setAudioBufferSize(p->core, 8192);
 
     if (p->core->platform(p->core) == mPLATFORM_GBA) {
         p->lockstepUser.sleep = wasm_lockstep_sleep;
