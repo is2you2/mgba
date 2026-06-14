@@ -25,12 +25,14 @@
 
 struct Player {
     struct mCore* core;
-    uint32_t* videoBuffer;
+    uint32_t* videoBuffers[2];
+    int currentBuffer;
     unsigned videoWidth;
     unsigned videoHeight;
     struct GBASIOLockstepDriver lockstepDriver;
     struct mLockstepUser lockstepUser;
     uint16_t inputState;
+    bool newFrameAvailable;
     pthread_cond_t cond;
     pthread_mutex_t mutex;
     pthread_t thread;
@@ -110,6 +112,8 @@ int mgba_init() {
     static bool initialized = false;
     if (initialized) return 1;
 
+    printf("WASM: mColor size: %zu bytes\n", sizeof(mColor));
+
     memset(players, 0, sizeof(players));
     for (int i = 0; i < MAX_PLAYERS; i++) {
         pthread_mutex_init(&players[i].mutex, NULL);
@@ -124,6 +128,24 @@ int mgba_init() {
     }
     initialized = true;
     return 1;
+}
+
+static void wasm_video_frame_ended(void* context) {
+    struct Player* p = (struct Player*)context;
+    // Note: This callback is called from p->core->step(), which is called from 
+    // mgba_run_player() while holding p->mutex.
+    if (p->videoBuffers[0] && p->videoBuffers[1]) {
+        // Apply alpha correction to the buffer that just finished
+        uint32_t* finishedBuffer = p->videoBuffers[p->currentBuffer];
+        for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
+            finishedBuffer[j] |= 0xFF000000;
+        }
+
+        // Swap buffers
+        p->currentBuffer = 1 - p->currentBuffer;
+        p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
+        p->newFrameAvailable = true;
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -176,10 +198,22 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     p->core->reset(p->core);
 
     p->core->currentVideoSize(p->core, &p->videoWidth, &p->videoHeight);
-    if (p->videoBuffer) free(p->videoBuffer);
-    p->videoBuffer = (uint32_t*)malloc(p->videoWidth * p->videoHeight * sizeof(uint32_t));
-    memset(p->videoBuffer, 0, p->videoWidth * p->videoHeight * sizeof(uint32_t));
-    p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffer, p->videoWidth);
+    if (p->videoBuffers[0]) free(p->videoBuffers[0]);
+    if (p->videoBuffers[1]) free(p->videoBuffers[1]);
+    p->videoBuffers[0] = (uint32_t*)malloc(p->videoWidth * p->videoHeight * sizeof(uint32_t));
+    p->videoBuffers[1] = (uint32_t*)malloc(p->videoWidth * p->videoHeight * sizeof(uint32_t));
+    memset(p->videoBuffers[0], 0, p->videoWidth * p->videoHeight * sizeof(uint32_t));
+    memset(p->videoBuffers[1], 0, p->videoWidth * p->videoHeight * sizeof(uint32_t));
+    
+    p->currentBuffer = 0;
+    p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
+    p->newFrameAvailable = false;
+
+    struct mCoreCallbacks callbacks = {
+        .context = p,
+        .videoFrameEnded = wasm_video_frame_ended
+    };
+    p->core->addCoreCallbacks(p->core, &callbacks);
 
     if (p->core->reloadConfigOption) {
         p->core->reloadConfigOption(p->core, "hwaccelVideo", NULL);
@@ -200,27 +234,28 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     p->lockstepDriver.asleep = false;
     p->active = true;
     pthread_mutex_unlock(&p->mutex);
-    printf("WASM: Player %d ROM Loaded. Thread-safe lockstep ready.\n", playerIndex);
+    printf("WASM: Player %d ROM Loaded. Buffer swapping enabled.\n", playerIndex);
     return 1;
 }
 
-// 메인 스레드에서는 더 이상 직접 프레임을 실행하지 않음 (비디오 버퍼 후처리용으로만 남김)
 EMSCRIPTEN_KEEPALIVE
-void mgba_post_frame(int playerIndex) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+int mgba_post_frame(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
     struct Player* p = &players[playerIndex];
+    int updated = 0;
     pthread_mutex_lock(&p->mutex);
-    if (p->videoBuffer) {
-        for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
-            p->videoBuffer[j] |= 0xFF000000;
-        }
+    if (p->newFrameAvailable) {
+        p->newFrameAvailable = false;
+        updated = 1;
     }
     pthread_mutex_unlock(&p->mutex);
+    return updated;
 }
 EMSCRIPTEN_KEEPALIVE
 uint32_t* mgba_get_video_buffer(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
-    return players[playerIndex].videoBuffer;
+    struct Player* p = &players[playerIndex];
+    return p->videoBuffers[1 - p->currentBuffer];
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -266,10 +301,12 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_set_button(int playerIndex, int button, int pressed) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
+    pthread_mutex_lock(&p->mutex);
     if (pressed)
         p->inputState |= (1 << button);
     else
         p->inputState &= ~(1 << button);
+    pthread_mutex_unlock(&p->mutex);
 }
 
 EMSCRIPTEN_KEEPALIVE
