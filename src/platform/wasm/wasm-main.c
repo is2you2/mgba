@@ -60,7 +60,7 @@ void mgba_run_player(int playerIndex) {
         if (p->core) {
             // 오디오 버퍼가 일정 수준 이상 차면 잠시 대기하여 실행 속도 조절 (Throttling)
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > 2048) {
+            if (audio && mAudioBufferAvailable(audio) > 1536) {
                 pthread_mutex_unlock(&p->mutex);
                 emscripten_thread_sleep(1); 
                 continue;
@@ -69,8 +69,8 @@ void mgba_run_player(int playerIndex) {
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
 
-            // 100 사이클씩 실행하여 뮤텍스 오버헤드와 속도 조절 사이의 균형을 맞춤
-            for (int i = 0; i < 100; ++i) {
+            // 더 작은 단위로 실행하여 오디오 동기화 및 락스텝 반응성 향상
+            for (int i = 0; i < 50; ++i) {
                 p->core->step(p->core);
                 if (p->lockstepDriver.asleep) break; 
             }
