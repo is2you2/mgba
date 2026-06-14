@@ -229,7 +229,18 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             const TARGET_BUFFER_DURATION = 0.08; // 80ms target audio buffer
             const MAX_FRAMES_PER_TICK = 5; // Max frames to catch up in one tick
 
-            function tick() {
+            function render() {
+                for (let i = 0; i < MAX_PLAYERS; i++) {
+                    const p = players[i];
+                    if (p.active && p.imageData) {
+                        p.ctx.putImageData(p.imageData, 0, 0);
+                    }
+                }
+                requestAnimationFrame(render);
+            }
+            requestAnimationFrame(render);
+
+            function runEmulation() {
                 if (audioContext && audioContext.state === 'running') {
                     let framesRun = 0;
                     while (framesRun < MAX_FRAMES_PER_TICK) {
@@ -254,11 +265,10 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                         for (let i = 0; i < MAX_PLAYERS; i++) {
                             const p = players[i];
                             if (p.active) {
-                                // Update Video
+                                // Update Video Buffer (rendering is handled by RAF)
                                 const bufferPtr = emulator.getVideoBuffer(i);
                                 const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
                                 p.imageData.data.set(videoData);
-                                p.ctx.putImageData(p.imageData, 0, 0);
 
                                 // Update Audio
                                 const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
@@ -298,9 +308,11 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 if (audioContext && audioContext.state === 'suspended') {
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
-                requestAnimationFrame(tick);
+                
+                // Continue emulation loop
+                setTimeout(runEmulation, 1);
             }
-            requestAnimationFrame(tick);
+            runEmulation();
         }
 
         document.getElementById('resume-audio').addEventListener('click', () => {
