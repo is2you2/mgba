@@ -144,57 +144,52 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     return 1;
 }
 
-// 워커 스레드에서 호출할 실행 루프
+// 플레이어 실행 루프 (모든 플레이어용)
 EMSCRIPTEN_KEEPALIVE
-void mgba_run_slave(int playerIndex) {
-    if (playerIndex <= 0 || playerIndex >= MAX_PLAYERS) return;
+void mgba_run_player(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
 
-    printf("WASM: Slave Player %d thread started.\n", playerIndex);
+    printf("WASM: Player %d thread started.\n", playerIndex);
 
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
         if (p->core) {
-            // 키 입력 적용
+            // 오디오 버퍼가 너무 가득 차면 잠시 대기하여 CPU 점유율 조절 (스로틀링)
+            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+            if (audio && mAudioBufferAvailable(audio) > 4096) {
+                pthread_mutex_unlock(&p->mutex);
+                emscripten_thread_sleep(1); // 1ms 대기
+                continue;
+            }
+
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
 
-            // 한 단계 실행 (lockstep_sleep에서 동기화됨. sleep 시 mutex가 해제됨)
-            p->core->step(p->core);
+            // 100 사이클씩 실행하여 뮤텍스 오버헤드 감소
+            for (int i = 0; i < 100; ++i) {
+                p->core->step(p->core);
+            }
             pthread_mutex_unlock(&p->mutex);
         } else {
             pthread_mutex_unlock(&p->mutex);
-            emscripten_thread_sleep(16);
+            emscripten_thread_sleep(10);
         }
     }
-    printf("WASM: Slave Player %d thread exiting.\n", playerIndex);
+    printf("WASM: Player %d thread exiting.\n", playerIndex);
 }
 
+// 메인 스레드에서는 더 이상 직접 프레임을 실행하지 않음 (비디오 버퍼 후처리용으로만 남김)
 EMSCRIPTEN_KEEPALIVE
-void mgba_run_frame(int playerIndex) {
+void mgba_post_frame(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    if (!p->core || !p->active) return;
-
-    const uint32_t CYCLES_PER_FRAME = 280896;
-    uint32_t targetCycles = mTimingCurrentTime(p->core->timing) + CYCLES_PER_FRAME;
-
-    pthread_mutex_lock(&p->mutex);
-    p->core->clearKeys(p->core, 0x3FF);
-    p->core->addKeys(p->core, p->inputState);
-
-    while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0) {
-        p->core->step(p->core);
-    }
-    pthread_mutex_unlock(&p->mutex);
-
     if (p->videoBuffer) {
         for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
             p->videoBuffer[j] |= 0xFF000000;
         }
     }
 }
-
 EMSCRIPTEN_KEEPALIVE
 uint32_t* mgba_get_video_buffer(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;

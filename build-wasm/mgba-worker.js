@@ -20,9 +20,8 @@ self.onmessage = async (e) => {
             wasmMemory: data.wasmMemory,
             onRuntimeInitialized: () => {
                 console.log(`WASM Worker: Player ${playerIndex} initialized.`);
-                Module._mgba_init();
-                // Slave 실행 루프 시작 (C단에서 무한 루프이므로 여기서 블록됨)
-                Module._mgba_run_slave(playerIndex);
+                // 실행 루프 시작 (C단에서 루프이므로 여기서 블록됨)
+                Module._mgba_run_player(playerIndex);
             }
         });
     } else if (type === 'setButton') {

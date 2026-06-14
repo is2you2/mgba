@@ -157,7 +157,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         async function init() {
             const status = document.getElementById('status');
             
-            // 1. 메인 모듈 로드 (Master)
+            // 1. 메인 모듈 로드 (UI 및 오디오 처리용)
             Module = await createMGBA();
             status.innerText = 'WASM Loaded. Ready for ROMs.';
             status.className = 'status-ready';
@@ -165,7 +165,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             emulator = {
                 init: Module.cwrap('mgba_init', 'number', []),
                 loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number', 'number']),
-                runFrame: Module.cwrap('mgba_run_frame', 'void', ['number']),
+                postFrame: Module.cwrap('mgba_post_frame', 'void', ['number']),
                 getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', ['number']),
                 getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number', 'number']),
                 getAudioSampleRate: Module.cwrap('mgba_get_audio_sample_rate', 'number', ['number']),
@@ -173,6 +173,8 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 getHeight: Module.cwrap('mgba_get_height', 'number', ['number']),
                 setButton: Module.cwrap('mgba_set_button', 'void', ['number', 'number', 'number']),
             };
+            
+            // 전역 초기화는 메인 스레드에서 한 번만 수행
             emulator.init();
             audioPtr = Module._malloc(AUDIO_BUFFER_SIZE * 2 * 2 * 4);
 
@@ -187,18 +189,16 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     audioNextTime: 0
                 };
 
-                // 2. 슬레이브 워커 생성 (Player 1, 2, 3)
-                if (i > 0) {
-                    const worker = new Worker('mgba-worker.js');
-                    workers[i] = worker;
-                    worker.postMessage({
-                        type: 'init',
-                        data: {
-                            playerIndex: i,
-                            wasmMemory: Module.wasmMemory
-                        }
-                    });
-                }
+                // 2. 모든 플레이어를 워커로 분리 (Player 0 포함)
+                const worker = new Worker('mgba-worker.js');
+                workers[i] = worker;
+                worker.postMessage({
+                    type: 'init',
+                    data: {
+                        playerIndex: i,
+                        wasmMemory: Module.wasmMemory
+                    }
+                });
             }
         }
 
@@ -240,13 +240,13 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         });
 
         function startLoop() {
-            const TARGET_BUFFER_DURATION = 0.08;
-            const MAX_FRAMES_PER_TICK = 5;
-
             function render() {
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
                     if (p.active && p.imageData) {
+                        // 알파 채널 보정 등을 위한 C단 호출
+                        emulator.postFrame(i);
+
                         // Video Buffer 업데이트 (Shared Memory이므로 직접 참조 가능)
                         const bufferPtr = emulator.getVideoBuffer(i);
                         const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
@@ -260,15 +260,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
             function runEmulation() {
                 if (audioContext && audioContext.state === 'running') {
-                    // Master (Player 0) 실행 제어. Slaves는 워커에서 각자 실행됨.
-                    const p0 = players[0];
-                    if (p0.active) {
-                        const bufferDepth = p0.audioNextTime - audioContext.currentTime;
-                        if (bufferDepth < TARGET_BUFFER_DURATION) {
-                            emulator.runFrame(0);
-                        }
-                    }
-
                     // 모든 플레이어의 오디오 출력 처리
                     for (let i = 0; i < MAX_PLAYERS; i++) {
                         const p = players[i];
@@ -309,7 +300,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
                 
-                setTimeout(runEmulation, 1);
+                setTimeout(runEmulation, 10); // 주기를 조금 늘려 메인 스레드 부하 감소
             }
             runEmulation();
         }
@@ -323,14 +314,11 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         const handleKey = (e, pressed) => {
             if (players[focusedPlayerIndex]?.active && KEY_MAP[e.key] !== undefined) {
-                if (focusedPlayerIndex === 0) {
-                    emulator.setButton(0, KEY_MAP[e.key], pressed);
-                } else {
-                    workers[focusedPlayerIndex].postMessage({
-                        type: 'setButton',
-                        data: { button: KEY_MAP[e.key], pressed: pressed }
-                    });
-                }
+                // 모든 입력은 워커로 전달
+                workers[focusedPlayerIndex].postMessage({
+                    type: 'setButton',
+                    data: { button: KEY_MAP[e.key], pressed: pressed }
+                });
                 e.preventDefault();
             }
         };
