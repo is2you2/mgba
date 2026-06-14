@@ -21,8 +21,10 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         .grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
             gap: 20px;
+            width: 100%;
+            max-width: 1000px;
         }
 
         .player-box {
@@ -95,27 +97,8 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         </p>
     </div>
 
-    <div class="grid">
-        <div class="player-box focused" id="box-0" onclick="setFocus(0)">
-            <div class="player-label">Player 1</div>
-            <div class="input-group"><input type="file" class="rom-upload" data-index="0" accept=".gba,.gb,.gbc"></div>
-            <canvas id="screen-0"></canvas>
-        </div>
-        <div class="player-box" id="box-1" onclick="setFocus(1)">
-            <div class="player-label">Player 2</div>
-            <div class="input-group"><input type="file" class="rom-upload" data-index="1" accept=".gba,.gb,.gbc"></div>
-            <canvas id="screen-1"></canvas>
-        </div>
-        <div class="player-box" id="box-2" onclick="setFocus(2)">
-            <div class="player-label">Player 3</div>
-            <div class="input-group"><input type="file" class="rom-upload" data-index="2" accept=".gba,.gb,.gbc"></div>
-            <canvas id="screen-2"></canvas>
-        </div>
-        <div class="player-box" id="box-3" onclick="setFocus(3)">
-            <div class="player-label">Player 4</div>
-            <div class="input-group"><input type="file" class="rom-upload" data-index="3" accept=".gba,.gb,.gbc"></div>
-            <canvas id="screen-3"></canvas>
-        </div>
+    <div class="grid" id="player-grid">
+        <!-- Players will be generated here -->
     </div>
 
     <script src="mgba.js"></script>
@@ -137,7 +120,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         let Module = null;
         let emulator = null;
         const players = [];
-        const MAX_PLAYERS = 4;
+        const MAX_PLAYERS = 4; // C단의 MAX_PLAYERS와 일치해야 함
         let focusedPlayerIndex = 0;
 
         // Audio state
@@ -153,10 +136,30 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             });
         }
 
+        function createPlayerUI(index) {
+            const grid = document.getElementById('player-grid');
+            const box = document.createElement('div');
+            box.className = `player-box ${index === 0 ? 'focused' : ''}`;
+            box.id = `box-${index}`;
+            box.onclick = () => setFocus(index);
+            
+            box.innerHTML = `
+                <div class="player-label">Player ${index + 1}</div>
+                <div class="input-group">
+                    <input type="file" class="rom-upload" data-index="${index}" accept=".gba,.gb,.gbc">
+                </div>
+                <canvas id="screen-${index}"></canvas>
+            `;
+            grid.appendChild(box);
+
+            const input = box.querySelector('.rom-upload');
+            input.addEventListener('change', (e) => handleRomUpload(e, index));
+        }
+
         async function init() {
             const status = document.getElementById('status');
             
-            // 1. 메인 모듈 로드 (UI 및 오디오 처리용)
+            // 1. 메인 모듈 로드
             Module = await createMGBA();
             status.innerText = 'WASM Loaded. Ready for ROMs.';
             status.className = 'status-ready';
@@ -173,11 +176,11 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 setButton: Module.cwrap('mgba_set_button', 'void', ['number', 'number', 'number']),
             };
             
-            // 전역 초기화는 메인 스레드에서 한 번만 수행
             emulator.init();
             audioPtr = Module._malloc(AUDIO_BUFFER_SIZE * 2 * 2 * 4);
 
             for (let i = 0; i < MAX_PLAYERS; i++) {
+                createPlayerUI(i);
                 const canvas = document.getElementById(`screen-${i}`);
                 players[i] = {
                     index: i,
@@ -192,54 +195,54 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         init();
 
-        document.querySelectorAll('.rom-upload').forEach(input => {
-            input.addEventListener('change', async (e) => {
-                const file = e.target.files[0];
-                if (!file || !emulator) return;
+        async function handleRomUpload(e, index) {
+            const file = e.target.files[0];
+            if (!file || !emulator) return;
 
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                }
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
 
-                const buffer = await file.arrayBuffer();
-                const uint8Array = new Uint8Array(buffer);
+            const buffer = await file.arrayBuffer();
+            const uint8Array = new Uint8Array(buffer);
 
-                for (let index = 0; index < MAX_PLAYERS; index++) {
-                    const ptr = Module._malloc(uint8Array.length);
-                    Module.HEAPU8.set(uint8Array, ptr);
-                    const success = emulator.loadRom(index, ptr, uint8Array.length);
-                    Module._free(ptr);
+            // 로드할 때 모든 활성 플레이어에 대해 처리하거나 특정 플레이어에만 처리
+            // 여기서는 업로드한 인덱스에 해당하는 플레이어에 로드
+            const ptr = Module._malloc(uint8Array.length);
+            Module.HEAPU8.set(uint8Array, ptr);
+            const success = emulator.loadRom(index, ptr, uint8Array.length);
+            Module._free(ptr);
 
-                    if (success) {
-                        const p = players[index];
-                        p.canvas.width = emulator.getWidth(index);
-                        p.canvas.height = emulator.getHeight(index);
-                        p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
-                        p.active = true;
-                        p.audioNextTime = audioContext.currentTime;
-                    }
-                }
+            if (success) {
+                const p = players[index];
+                p.canvas.width = emulator.getWidth(index);
+                p.canvas.height = emulator.getHeight(index);
+                p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
+                p.active = true;
+                p.audioNextTime = audioContext.currentTime;
+            }
 
-                if (!window.loopStarted) {
-                    window.loopStarted = true;
-                    startLoop();
-                }
-            });
-        });
+            if (!window.loopStarted) {
+                window.loopStarted = true;
+                startLoop();
+            }
+        }
 
         function startLoop() {
             function render() {
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
-                    if (p.active && p.imageData) {
+                    if (p && p.active && p.imageData) {
                         // 알파 채널 보정 등을 위한 C단 호출
                         emulator.postFrame(i);
 
                         // Video Buffer 업데이트 (Shared Memory이므로 직접 참조 가능)
                         const bufferPtr = emulator.getVideoBuffer(i);
-                        const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
-                        p.imageData.data.set(videoData);
-                        p.ctx.putImageData(p.imageData, 0, 0);
+                        if (bufferPtr) {
+                            const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
+                            p.imageData.data.set(videoData);
+                            p.ctx.putImageData(p.imageData, 0, 0);
+                        }
                     }
                 }
                 requestAnimationFrame(render);
@@ -251,7 +254,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     // 모든 플레이어의 오디오 출력 처리
                     for (let i = 0; i < MAX_PLAYERS; i++) {
                         const p = players[i];
-                        if (p.active) {
+                        if (p && p.active) {
                             const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
                             let numSamples;
                             while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
@@ -288,7 +291,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
                 
-                setTimeout(runEmulation, 10); // 주기를 조금 늘려 메인 스레드 부하 감소
+                setTimeout(runEmulation, 16); // 60fps에 근접하도록 조정
             }
             runEmulation();
         }
