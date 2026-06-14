@@ -137,7 +137,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         let Module = null;
         let emulator = null;
         const players = [];
-        const workers = [];
         const MAX_PLAYERS = 4;
         let focusedPlayerIndex = 0;
 
@@ -188,17 +187,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     active: false,
                     audioNextTime: 0
                 };
-
-                // 2. 모든 플레이어를 워커로 분리 (Player 0 포함)
-                const worker = new Worker('mgba-worker.js');
-                workers[i] = worker;
-                worker.postMessage({
-                    type: 'init',
-                    data: {
-                        playerIndex: i,
-                        wasmMemory: Module.wasmMemory
-                    }
-                });
             }
         }
 
@@ -314,11 +302,8 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         const handleKey = (e, pressed) => {
             if (players[focusedPlayerIndex]?.active && KEY_MAP[e.key] !== undefined) {
-                // 모든 입력은 워커로 전달
-                workers[focusedPlayerIndex].postMessage({
-                    type: 'setButton',
-                    data: { button: KEY_MAP[e.key], pressed: pressed }
-                });
+                // 직접 WASM 함수 호출 (메모리 공유 및 멀티스레딩이므로 안전)
+                emulator.setButton(focusedPlayerIndex, KEY_MAP[e.key], pressed);
                 e.preventDefault();
             }
         };

@@ -33,6 +33,7 @@ struct Player {
     uint16_t inputState;
     pthread_cond_t cond;
     pthread_mutex_t mutex;
+    pthread_t thread;
     bool active;
 };
 
@@ -40,20 +41,66 @@ static struct Player players[MAX_PLAYERS];
 static struct GBASIOLockstepCoordinator coordinator;
 static bool coordinatorInitialized = false;
 
+// 플레이어 실행 루프 (모든 플레이어용)
+EMSCRIPTEN_KEEPALIVE
+void mgba_run_player(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+
+    printf("WASM: Player %d thread started.\n", playerIndex);
+
+    while (p->active) {
+        pthread_mutex_lock(&p->mutex);
+
+        // Lockstep 동기화로 인해 잠든 상태면 조건 변수로 대기 (뮤텍스 자동 해제)
+        while (p->lockstepDriver.asleep) {
+            pthread_cond_wait(&p->cond, &p->mutex);
+        }
+
+        if (p->core) {
+            // 오디오 버퍼가 너무 가득 차면 잠시 대기하여 CPU 점유율 조절 (스로틀링)
+            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+            if (audio && mAudioBufferAvailable(audio) > 8192) {
+                pthread_mutex_unlock(&p->mutex);
+                emscripten_thread_sleep(1); 
+                continue;
+            }
+
+            p->core->clearKeys(p->core, 0x3FF);
+            p->core->addKeys(p->core, p->inputState);
+
+            // 200 사이클씩 실행하여 뮤텍스 오버헤드 감소
+            for (int i = 0; i < 200; ++i) {
+                p->core->step(p->core);
+                if (p->lockstepDriver.asleep) break; // 실행 중 잠들면 즉시 중단
+            }
+            pthread_mutex_unlock(&p->mutex);
+        } else {
+            pthread_mutex_unlock(&p->mutex);
+            emscripten_thread_sleep(10);
+        }
+    }
+    printf("WASM: Player %d thread exiting.\n", playerIndex);
+}
+
+static void* player_thread_entry(void* arg) {
+    int playerIndex = (int)(intptr_t)arg;
+    mgba_run_player(playerIndex);
+    return NULL;
+}
+
 // 멀티 스레드 WASM 환경을 위한 락스텝 콜백 함수
 static void wasm_lockstep_sleep(struct mLockstepUser* user) {
-    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
-    pthread_mutex_lock(&p->mutex);
-    while (p->lockstepDriver.asleep) {
-        pthread_cond_wait(&p->cond, &p->mutex);
-    }
-    pthread_mutex_unlock(&p->mutex);
+    // 중요: 이 콜백은 lockstep.c 내부에서 coordinator->mutex를 쥐고 호출됩니다.
+    // 여기서 pthread_cond_wait 등으로 블록하면 다른 스레드가 coordinator->mutex를 얻지 못해 
+    // Ack를 보낼 수 없게 되고 결국 전체 시스템이 데드락에 빠집니다.
+    // 따라서 여기서는 블록하지 않고 즉시 리턴하며, 실제 대기는 mgba_run_player 루프에서 수행합니다.
+    (void)user;
 }
 
 static void wasm_lockstep_wake(struct mLockstepUser* user) {
     struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
     pthread_mutex_lock(&p->mutex);
-    // asleep flag is already cleared by GBASIOLockstepPlayerWake before calling wake
     pthread_cond_signal(&p->cond);
     pthread_mutex_unlock(&p->mutex);
 }
@@ -67,6 +114,8 @@ int mgba_init() {
     for (int i = 0; i < MAX_PLAYERS; i++) {
         pthread_mutex_init(&players[i].mutex, NULL);
         pthread_cond_init(&players[i].cond, NULL);
+        players[i].active = true;
+        pthread_create(&players[i].thread, NULL, player_thread_entry, (void*)(intptr_t)i);
     }
 
     if (!coordinatorInitialized) {
@@ -82,6 +131,9 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
     struct Player* p = &players[playerIndex];
 
+    // ROM 로딩 시에도 안전을 위해 잠시 락
+    pthread_mutex_lock(&p->mutex);
+
     if (p->core) {
         if (p->core->platform(p->core) == mPLATFORM_GBA) {
             GBASIOLockstepCoordinatorDetach(&coordinator, &p->lockstepDriver);
@@ -91,11 +143,15 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     }
 
     struct VFile* vf = VFileMemChunk(buffer, size);
-    if (!vf) return 0;
+    if (!vf) {
+        pthread_mutex_unlock(&p->mutex);
+        return 0;
+    }
 
     p->core = mCoreFindVF(vf);
     if (!p->core) {
         vf->close(vf);
+        pthread_mutex_unlock(&p->mutex);
         return 0;
     }
 
@@ -111,6 +167,7 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     if (!p->core->loadROM(p->core, vf)) {
         p->core->deinit(p->core);
         p->core = NULL;
+        pthread_mutex_unlock(&p->mutex);
         return 0;
     }
 
@@ -140,43 +197,9 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
 
     p->lockstepDriver.asleep = false;
     p->active = true;
-    printf("WASM: Player %d ROM Loaded. Thread-safe lockstep enabled.\n", playerIndex);
+    pthread_mutex_unlock(&p->mutex);
+    printf("WASM: Player %d ROM Loaded. Thread-safe lockstep ready.\n", playerIndex);
     return 1;
-}
-
-// 플레이어 실행 루프 (모든 플레이어용)
-EMSCRIPTEN_KEEPALIVE
-void mgba_run_player(int playerIndex) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
-    struct Player* p = &players[playerIndex];
-
-    printf("WASM: Player %d thread started.\n", playerIndex);
-
-    while (p->active) {
-        pthread_mutex_lock(&p->mutex);
-        if (p->core) {
-            // 오디오 버퍼가 너무 가득 차면 잠시 대기하여 CPU 점유율 조절 (스로틀링)
-            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > 4096) {
-                pthread_mutex_unlock(&p->mutex);
-                emscripten_thread_sleep(1); // 1ms 대기
-                continue;
-            }
-
-            p->core->clearKeys(p->core, 0x3FF);
-            p->core->addKeys(p->core, p->inputState);
-
-            // 100 사이클씩 실행하여 뮤텍스 오버헤드 감소
-            for (int i = 0; i < 100; ++i) {
-                p->core->step(p->core);
-            }
-            pthread_mutex_unlock(&p->mutex);
-        } else {
-            pthread_mutex_unlock(&p->mutex);
-            emscripten_thread_sleep(10);
-        }
-    }
-    printf("WASM: Player %d thread exiting.\n", playerIndex);
 }
 
 // 메인 스레드에서는 더 이상 직접 프레임을 실행하지 않음 (비디오 버퍼 후처리용으로만 남김)
@@ -184,11 +207,13 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_post_frame(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
+    pthread_mutex_lock(&p->mutex);
     if (p->videoBuffer) {
         for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
             p->videoBuffer[j] |= 0xFF000000;
         }
     }
+    pthread_mutex_unlock(&p->mutex);
 }
 EMSCRIPTEN_KEEPALIVE
 uint32_t* mgba_get_video_buffer(int playerIndex) {
