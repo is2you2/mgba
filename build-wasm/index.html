@@ -167,7 +167,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             emulator = {
                 init: Module.cwrap('mgba_init', 'number', []),
                 loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number', 'number']),
-                postFrame: Module.cwrap('mgba_post_frame', 'void', ['number']),
+                postFrame: Module.cwrap('mgba_post_frame', 'number', ['number']),
                 getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', ['number']),
                 getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number', 'number']),
                 getAudioSampleRate: Module.cwrap('mgba_get_audio_sample_rate', 'number', ['number']),
@@ -235,15 +235,15 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
                     if (p && p.active && p.imageData) {
-                        // 알파 채널 보정 등을 위한 C단 호출
-                        emulator.postFrame(i);
-
-                        // Video Buffer 업데이트 (Shared Memory이므로 직접 참조 가능)
-                        const bufferPtr = emulator.getVideoBuffer(i);
-                        if (bufferPtr) {
-                            const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
-                            p.imageData.data.set(videoData);
-                            p.ctx.putImageData(p.imageData, 0, 0);
+                        // 알파 채널 보정 등을 위한 C단 호출 및 업데이트 여부 확인
+                        if (emulator.postFrame(i)) {
+                            // Video Buffer 업데이트 (Shared Memory이므로 직접 참조 가능)
+                            const bufferPtr = emulator.getVideoBuffer(i);
+                            if (bufferPtr) {
+                                const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
+                                p.imageData.data.set(videoData);
+                                p.ctx.putImageData(p.imageData, 0, 0);
+                            }
                         }
                     }
                 }
