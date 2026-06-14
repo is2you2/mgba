@@ -137,6 +137,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         let Module = null;
         let emulator = null;
         const players = [];
+        const workers = [];
         const MAX_PLAYERS = 4;
         let focusedPlayerIndex = 0;
 
@@ -153,17 +154,18 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             });
         }
 
-        createMGBA().then(m => {
-            Module = m;
+        async function init() {
             const status = document.getElementById('status');
+            
+            // 1. 메인 모듈 로드 (Master)
+            Module = await createMGBA();
             status.innerText = 'WASM Loaded. Ready for ROMs.';
             status.className = 'status-ready';
 
             emulator = {
                 init: Module.cwrap('mgba_init', 'number', []),
                 loadRom: Module.cwrap('mgba_load_rom', 'number', ['number', 'number', 'number']),
-                syncBoot: Module.cwrap('mgba_sync_boot', 'void', []),
-                runFrame: Module.cwrap('mgba_run_frame', 'void', []),
+                runFrame: Module.cwrap('mgba_run_frame', 'void', ['number']),
                 getVideoBuffer: Module.cwrap('mgba_get_video_buffer', 'number', ['number']),
                 getAudioSamples: Module.cwrap('mgba_get_audio_samples', 'number', ['number', 'number', 'number']),
                 getAudioSampleRate: Module.cwrap('mgba_get_audio_sample_rate', 'number', ['number']),
@@ -184,8 +186,23 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     active: false,
                     audioNextTime: 0
                 };
+
+                // 2. 슬레이브 워커 생성 (Player 1, 2, 3)
+                if (i > 0) {
+                    const worker = new Worker('mgba-worker.js');
+                    workers[i] = worker;
+                    worker.postMessage({
+                        type: 'init',
+                        data: {
+                            playerIndex: i,
+                            wasmMemory: Module.wasmMemory
+                        }
+                    });
+                }
             }
-        });
+        }
+
+        init();
 
         document.querySelectorAll('.rom-upload').forEach(input => {
             input.addEventListener('change', async (e) => {
@@ -215,9 +232,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     }
                 }
 
-                // 모든 플레이어 로드 후 동기화 부팅 수행
-                emulator.syncBoot();
-
                 if (!window.loopStarted) {
                     window.loopStarted = true;
                     startLoop();
@@ -226,13 +240,17 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         });
 
         function startLoop() {
-            const TARGET_BUFFER_DURATION = 0.08; // 80ms target audio buffer
-            const MAX_FRAMES_PER_TICK = 5; // Max frames to catch up in one tick
+            const TARGET_BUFFER_DURATION = 0.08;
+            const MAX_FRAMES_PER_TICK = 5;
 
             function render() {
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
                     if (p.active && p.imageData) {
+                        // Video Buffer 업데이트 (Shared Memory이므로 직접 참조 가능)
+                        const bufferPtr = emulator.getVideoBuffer(i);
+                        const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
+                        p.imageData.data.set(videoData);
                         p.ctx.putImageData(p.imageData, 0, 0);
                     }
                 }
@@ -242,64 +260,46 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
             function runEmulation() {
                 if (audioContext && audioContext.state === 'running') {
-                    let framesRun = 0;
-                    while (framesRun < MAX_FRAMES_PER_TICK) {
-                        let needsMoreAudio = false;
-                        for (let i = 0; i < MAX_PLAYERS; i++) {
-                            const p = players[i];
-                            if (p.active) {
-                                const bufferDepth = p.audioNextTime - audioContext.currentTime;
-                                if (bufferDepth < TARGET_BUFFER_DURATION) {
-                                    needsMoreAudio = true;
-                                    break;
-                                }
-                            }
+                    // Master (Player 0) 실행 제어. Slaves는 워커에서 각자 실행됨.
+                    const p0 = players[0];
+                    if (p0.active) {
+                        const bufferDepth = p0.audioNextTime - audioContext.currentTime;
+                        if (bufferDepth < TARGET_BUFFER_DURATION) {
+                            emulator.runFrame(0);
                         }
+                    }
 
-                        if (!needsMoreAudio) break;
-
-                        // Run all active players for one frame
-                        emulator.runFrame();
-                        framesRun++;
-
-                        for (let i = 0; i < MAX_PLAYERS; i++) {
-                            const p = players[i];
-                            if (p.active) {
-                                // Update Video Buffer (rendering is handled by RAF)
-                                const bufferPtr = emulator.getVideoBuffer(i);
-                                const videoData = new Uint8ClampedArray(Module.HEAPU8.buffer, bufferPtr, p.canvas.width * p.canvas.height * 4);
-                                p.imageData.data.set(videoData);
-
-                                // Update Audio
-                                const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
-                                let numSamples;
-                                while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
-                                    const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
-                                    const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, emulatorSampleRate);
-                                    const leftChannel = audioBuffer.getChannelData(0);
-                                    const rightChannel = audioBuffer.getChannelData(1);
-                                    for (let j = 0; j < numSamples / AUDIO_CHANNELS; j++) {
-                                        leftChannel[j] = audioData[j * 2] / 32768.0;
-                                        rightChannel[j] = audioData[j * 2 + 1] / 32768.0;
-                                    }
-                                    const source = audioContext.createBufferSource();
-                                    source.buffer = audioBuffer;
-                                    source.connect(audioContext.destination);
-
-                                    // Handle drift/reset
-                                    const drift = p.audioNextTime - audioContext.currentTime;
-                                    if (drift > 0.2 || drift < -0.2) {
-                                        p.audioNextTime = audioContext.currentTime;
-                                    }
-
-                                    const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
-                                    source.start(playTime);
-                                    p.audioNextTime = playTime + audioBuffer.duration;
-                                    
-                                    source.onended = () => {
-                                        source.disconnect();
-                                    };
+                    // 모든 플레이어의 오디오 출력 처리
+                    for (let i = 0; i < MAX_PLAYERS; i++) {
+                        const p = players[i];
+                        if (p.active) {
+                            const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
+                            let numSamples;
+                            while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
+                                const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
+                                const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, emulatorSampleRate);
+                                const leftChannel = audioBuffer.getChannelData(0);
+                                const rightChannel = audioBuffer.getChannelData(1);
+                                for (let j = 0; j < numSamples / AUDIO_CHANNELS; j++) {
+                                    leftChannel[j] = audioData[j * 2] / 32768.0;
+                                    rightChannel[j] = audioData[j * 2 + 1] / 32768.0;
                                 }
+                                const source = audioContext.createBufferSource();
+                                source.buffer = audioBuffer;
+                                source.connect(audioContext.destination);
+
+                                const drift = p.audioNextTime - audioContext.currentTime;
+                                if (drift > 0.2 || drift < -0.2) {
+                                    p.audioNextTime = audioContext.currentTime;
+                                }
+
+                                const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
+                                source.start(playTime);
+                                p.audioNextTime = playTime + audioBuffer.duration;
+                                
+                                source.onended = () => {
+                                    source.disconnect();
+                                };
                             }
                         }
                     }
@@ -309,7 +309,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
                 
-                // Continue emulation loop
                 setTimeout(runEmulation, 1);
             }
             runEmulation();
@@ -324,7 +323,14 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         const handleKey = (e, pressed) => {
             if (players[focusedPlayerIndex]?.active && KEY_MAP[e.key] !== undefined) {
-                emulator.setButton(focusedPlayerIndex, KEY_MAP[e.key], pressed);
+                if (focusedPlayerIndex === 0) {
+                    emulator.setButton(0, KEY_MAP[e.key], pressed);
+                } else {
+                    workers[focusedPlayerIndex].postMessage({
+                        type: 'setButton',
+                        data: { button: KEY_MAP[e.key], pressed: pressed }
+                    });
+                }
                 e.preventDefault();
             }
         };

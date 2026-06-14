@@ -5,6 +5,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <emscripten.h>
+#include <emscripten/threading.h>
+#include <pthread.h>
 #include <mgba/core/core.h>
 #include <mgba/core/interface.h>
 #include <mgba/core/config.h>
@@ -29,28 +31,49 @@ struct Player {
     struct GBASIOLockstepDriver lockstepDriver;
     struct mLockstepUser lockstepUser;
     uint16_t inputState;
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    bool active;
 };
 
 static struct Player players[MAX_PLAYERS];
 static struct GBASIOLockstepCoordinator coordinator;
 static bool coordinatorInitialized = false;
 
-// 싱글 스레드 WASM 환경을 위한 락스텝 콜백 함수
+// 멀티 스레드 WASM 환경을 위한 락스텝 콜백 함수
 static void wasm_lockstep_sleep(struct mLockstepUser* user) {
-    (void)user;
+    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
+    pthread_mutex_lock(&p->mutex);
+    while (p->lockstepDriver.asleep) {
+        pthread_cond_wait(&p->cond, &p->mutex);
+    }
+    pthread_mutex_unlock(&p->mutex);
 }
 
 static void wasm_lockstep_wake(struct mLockstepUser* user) {
-    (void)user;
+    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
+    pthread_mutex_lock(&p->mutex);
+    // asleep flag is already cleared by GBASIOLockstepPlayerWake before calling wake
+    pthread_cond_signal(&p->cond);
+    pthread_mutex_unlock(&p->mutex);
 }
 
 EMSCRIPTEN_KEEPALIVE
 int mgba_init() {
+    static bool initialized = false;
+    if (initialized) return 1;
+
     memset(players, 0, sizeof(players));
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        pthread_mutex_init(&players[i].mutex, NULL);
+        pthread_cond_init(&players[i].cond, NULL);
+    }
+
     if (!coordinatorInitialized) {
         GBASIOLockstepCoordinatorInit(&coordinator);
         coordinatorInitialized = true;
     }
+    initialized = true;
     return 1;
 }
 
@@ -81,7 +104,7 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     mCoreConfigSetDefaultValue(&p->core->config, "skipBios", "yes");
     mCoreConfigSetDefaultIntValue(&p->core->config, "volume", 256);
     mCoreConfigSetDefaultValue(&p->core->config, "mute", "no");
-    
+
     p->core->init(p->core);
     mCoreLoadConfig(p->core);
 
@@ -90,7 +113,7 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
         p->core = NULL;
         return 0;
     }
-    
+
     p->core->reset(p->core);
 
     p->core->currentVideoSize(p->core, &p->videoWidth, &p->videoHeight);
@@ -98,115 +121,76 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     p->videoBuffer = (uint32_t*)malloc(p->videoWidth * p->videoHeight * sizeof(uint32_t));
     memset(p->videoBuffer, 0, p->videoWidth * p->videoHeight * sizeof(uint32_t));
     p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffer, p->videoWidth);
-    
+
     if (p->core->reloadConfigOption) {
         p->core->reloadConfigOption(p->core, "hwaccelVideo", NULL);
     }
 
-    // Web Audio JS단 버퍼(2048)와 동기화를 극대화하기 위해 버퍼 크기 축소 (지연 시간 해소)
     p->core->setAudioBufferSize(p->core, 2048);
 
-    // GBA 링크 케이블 하드웨어 연동 설정
     if (p->core->platform(p->core) == mPLATFORM_GBA) {
         p->lockstepUser.sleep = wasm_lockstep_sleep;
         p->lockstepUser.wake = wasm_lockstep_wake;
         GBASIOLockstepDriverCreate(&p->lockstepDriver, &p->lockstepUser);
         GBASIOLockstepCoordinatorAttach(&coordinator, &p->lockstepDriver);
-        
+
         struct GBA* gba = (struct GBA*)p->core->board;
         GBASIOSetDriver(&gba->sio, &p->lockstepDriver.d);
     }
-    
+
     p->lockstepDriver.asleep = false;
-    printf("WASM: Player %d ROM Loaded Successfully. Res: %ux%u\n", playerIndex, p->videoWidth, p->videoHeight);
+    p->active = true;
+    printf("WASM: Player %d ROM Loaded. Thread-safe lockstep enabled.\n", playerIndex);
     return 1;
 }
 
+// 워커 스레드에서 호출할 실행 루프
 EMSCRIPTEN_KEEPALIVE
-void mgba_sync_boot() {
-    // 부팅 초기 약 20,000 사이클 동안 매우 조밀한 인터리빙 수행 (SIO 핸드셰이크 안정화)
-    const uint32_t BOOT_SYNC_CYCLES = 20000;
-    uint32_t targetCycles[MAX_PLAYERS];
-    bool active[MAX_PLAYERS];
-    
-    for (int i = 0; i < MAX_PLAYERS; i++) {
-        struct Player* p = &players[i];
+void mgba_run_slave(int playerIndex) {
+    if (playerIndex <= 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+
+    printf("WASM: Slave Player %d thread started.\n", playerIndex);
+
+    while (p->active) {
+        pthread_mutex_lock(&p->mutex);
         if (p->core) {
-            targetCycles[i] = mTimingCurrentTime(p->core->timing) + BOOT_SYNC_CYCLES;
-            active[i] = true;
+            // 키 입력 적용
+            p->core->clearKeys(p->core, 0x3FF);
+            p->core->addKeys(p->core, p->inputState);
+
+            // 한 단계 실행 (lockstep_sleep에서 동기화됨. sleep 시 mutex가 해제됨)
+            p->core->step(p->core);
+            pthread_mutex_unlock(&p->mutex);
         } else {
-            active[i] = false;
+            pthread_mutex_unlock(&p->mutex);
+            emscripten_thread_sleep(16);
         }
     }
-
-    bool anyRunning;
-    const uint32_t BOOT_CHUNK_SIZE = 64; // 부팅 시에는 매우 작은 단위로 교차 실행
-    do {
-        anyRunning = false;
-        for (int i = 0; i < MAX_PLAYERS; i++) {
-            struct Player* p = &players[i];
-            if (!active[i] || p->lockstepDriver.asleep) continue;
-
-            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
-            int32_t remaining = (int32_t)(targetCycles[i] - currentCycles);
-            if (remaining > 0) {
-                uint32_t endCycles = currentCycles + (remaining > BOOT_CHUNK_SIZE ? BOOT_CHUNK_SIZE : remaining);
-                while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                    p->core->step(p->core);
-                }
-                anyRunning = true;
-            }
-        }
-    } while (anyRunning);
-    printf("WASM: Sync Boot Completed.\n");
+    printf("WASM: Slave Player %d thread exiting.\n", playerIndex);
 }
 
 EMSCRIPTEN_KEEPALIVE
-void mgba_run_frame() {
-    const uint32_t CYCLES_PER_FRAME = 280896; // GBA 1프레임당 표준 하드웨어 클럭 수
-    uint32_t targetCycles[MAX_PLAYERS];
-    bool active[MAX_PLAYERS];
-    
-    for (int i = 0; i < MAX_PLAYERS; i++) {
-        struct Player* p = &players[i];
-        if (p->core) {
-            targetCycles[i] = mTimingCurrentTime(p->core->timing) + CYCLES_PER_FRAME;
-            active[i] = true;
-            // 키 입력처리
-            p->core->clearKeys(p->core, 0x3FF);
-            p->core->addKeys(p->core, p->inputState);
-        } else {
-            active[i] = false;
-        }
+void mgba_run_frame(int playerIndex) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+    if (!p->core || !p->active) return;
+
+    const uint32_t CYCLES_PER_FRAME = 280896;
+    uint32_t targetCycles = mTimingCurrentTime(p->core->timing) + CYCLES_PER_FRAME;
+
+    pthread_mutex_lock(&p->mutex);
+    p->core->clearKeys(p->core, 0x3FF);
+    p->core->addKeys(p->core, p->inputState);
+
+    while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0) {
+        p->core->step(p->core);
     }
+    pthread_mutex_unlock(&p->mutex);
 
-    bool anyRunning;
-    const uint32_t CHUNK_SIZE = CYCLES_PER_FRAME;
-    do {
-        anyRunning = false;
-        for (int i = 0; i < MAX_PLAYERS; i++) {
-            struct Player* p = &players[i];
-            if (!active[i] || p->lockstepDriver.asleep) continue;
-
-            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
-            int32_t remaining = (int32_t)(targetCycles[i] - currentCycles);
-            if (remaining > 0) {
-                uint32_t endCycles = currentCycles + (remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining);
-                while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                    p->core->step(p->core);
-                }
-                anyRunning = true;
-            }
-        }
-    } while (anyRunning);
-
-    // Post-frame processing
-    for (int i = 0; i < MAX_PLAYERS; i++) {
-        struct Player* p = &players[i];
-        if (active[i] && p->videoBuffer) {
-            for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
-                p->videoBuffer[j] |= 0xFF000000;
-            }
+    if (p->videoBuffer) {
+        for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
+            p->videoBuffer[j] |= 0xFF000000;
         }
     }
 }
@@ -222,32 +206,26 @@ int mgba_get_audio_samples(int playerIndex, int16_t* outBuffer, size_t maxSample
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
     struct Player* p = &players[playerIndex];
     if (!p->core) return 0;
+
+    pthread_mutex_lock(&p->mutex);
     struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-    if (!audio) return 0;
+    if (!audio) {
+        pthread_mutex_unlock(&p->mutex);
+        return 0;
+    }
     size_t availablePairs = mAudioBufferAvailable(audio);
     if (availablePairs * 2 > maxSamples) availablePairs = maxSamples / 2;
     mAudioBufferRead(audio, outBuffer, availablePairs);
+    pthread_mutex_unlock(&p->mutex);
+
     return (int)(availablePairs * 2);
 }
-
 EMSCRIPTEN_KEEPALIVE
 unsigned mgba_get_audio_sample_rate(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
     struct Player* p = &players[playerIndex];
     if (!p->core) return 0;
     return p->core->audioSampleRate(p->core);
-}
-
-EMSCRIPTEN_KEEPALIVE
-void mgba_set_volume(int playerIndex, int volume) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
-    struct Player* p = &players[playerIndex];
-    if (p->core) {
-        p->core->opts.volume = volume;
-        if (p->core->reloadConfigOption) {
-            p->core->reloadConfigOption(p->core, "volume", NULL);
-        }
-    }
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -264,6 +242,7 @@ unsigned mgba_get_height(int playerIndex) {
 
 EMSCRIPTEN_KEEPALIVE
 void mgba_set_button(int playerIndex, int button, int pressed) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
     if (pressed)
         p->inputState |= (1 << button);
@@ -272,12 +251,24 @@ void mgba_set_button(int playerIndex, int button, int pressed) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+void mgba_set_volume(int playerIndex, int volume) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
+    struct Player* p = &players[playerIndex];
+    if (p->core) {
+        p->core->opts.volume = volume;
+        if (p->core->reloadConfigOption) {
+            p->core->reloadConfigOption(p->core, "volume", NULL);
+        }
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
 uint8_t* mgba_save_state(int playerIndex, size_t* outSize) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
     struct Player* p = &players[playerIndex];
     if (!p->core) return NULL;
-    
-    size_t bufferSize = 1024 * 1024; // 일반적인 GBA 세이브 상태는 1MB 내외로 충분
+
+    size_t bufferSize = 1024 * 1024;
     uint8_t* buffer = (uint8_t*)malloc(bufferSize);
     if (!buffer) return NULL;
 
@@ -303,10 +294,7 @@ int mgba_load_state(int playerIndex, uint8_t* buffer, size_t size) {
     return success ? 1 : 0;
 }
 
-// 중요: 외부 JS 환경에서 받아간 세이브 버퍼 포인터를 명시적으로 청소하기 위한 래퍼 함수
 EMSCRIPTEN_KEEPALIVE
 void mgba_free_buffer(void* ptr) {
-    if (ptr) {
-        free(ptr);
-    }
+    if (ptr) free(ptr);
 }
