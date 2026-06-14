@@ -142,7 +142,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             box.className = `player-box ${index === 0 ? 'focused' : ''}`;
             box.id = `box-${index}`;
             box.onclick = () => setFocus(index);
-            
+
             box.innerHTML = `
                 <div class="player-label">Player ${index + 1}</div>
                 <div class="input-group">
@@ -153,12 +153,12 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             grid.appendChild(box);
 
             const input = box.querySelector('.rom-upload');
-            input.addEventListener('change', (e) => handleRomUpload(e, index));
+            input.addEventListener('change', (e) => handleRomUpload(e));
         }
 
         async function init() {
             const status = document.getElementById('status');
-            
+
             // 1. 메인 모듈 로드
             Module = await createMGBA();
             status.innerText = 'WASM Loaded. Ready for ROMs.';
@@ -175,7 +175,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 getHeight: Module.cwrap('mgba_get_height', 'number', ['number']),
                 setButton: Module.cwrap('mgba_set_button', 'void', ['number', 'number', 'number']),
             };
-            
+
             emulator.init();
             audioPtr = Module._malloc(AUDIO_BUFFER_SIZE * 2 * 2 * 4);
 
@@ -195,7 +195,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         init();
 
-        async function handleRomUpload(e, index) {
+        async function handleRomUpload(e) {
             const file = e.target.files[0];
             if (!file || !emulator) return;
 
@@ -206,20 +206,22 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             const buffer = await file.arrayBuffer();
             const uint8Array = new Uint8Array(buffer);
 
-            // 로드할 때 모든 활성 플레이어에 대해 처리하거나 특정 플레이어에만 처리
-            // 여기서는 업로드한 인덱스에 해당하는 플레이어에 로드
-            const ptr = Module._malloc(uint8Array.length);
-            Module.HEAPU8.set(uint8Array, ptr);
-            const success = emulator.loadRom(index, ptr, uint8Array.length);
-            Module._free(ptr);
+            for (let i = 0, j = MAX_PLAYERS; i < j; i++) {
+                // 로드할 때 모든 활성 플레이어에 대해 처리하거나 특정 플레이어에만 처리
+                // 여기서는 업로드한 인덱스에 해당하는 플레이어에 로드
+                const ptr = Module._malloc(uint8Array.length);
+                Module.HEAPU8.set(uint8Array, ptr);
+                const success = emulator.loadRom(i, ptr, uint8Array.length);
+                Module._free(ptr);
 
-            if (success) {
-                const p = players[index];
-                p.canvas.width = emulator.getWidth(index);
-                p.canvas.height = emulator.getHeight(index);
-                p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
-                p.active = true;
-                p.audioNextTime = audioContext.currentTime;
+                if (success) {
+                    const p = players[i];
+                    p.canvas.width = emulator.getWidth(i);
+                    p.canvas.height = emulator.getHeight(i);
+                    p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
+                    p.active = true;
+                    p.audioNextTime = audioContext.currentTime;
+                }
             }
 
             if (!window.loopStarted) {
@@ -278,7 +280,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                                 const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
                                 source.start(playTime);
                                 p.audioNextTime = playTime + audioBuffer.duration;
-                                
+
                                 source.onended = () => {
                                     source.disconnect();
                                 };
@@ -290,7 +292,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 if (audioContext && audioContext.state === 'suspended') {
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
-                
+
                 setTimeout(runEmulation, 16); // 60fps에 근접하도록 조정
             }
             runEmulation();
