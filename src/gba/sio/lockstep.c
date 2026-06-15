@@ -203,6 +203,7 @@ static void GBASIOLockstepDriverReset(struct GBASIODriver* driver) {
 		player->driver = lockstep;
 		player->mode = driver->p->mode;
 		player->playerId = -1;
+		lockstep->cachedPlayerId = -1;
 
 		int i;
 		for (i = 0; i < MAX_LOCKSTEP_EVENTS - 1; ++i) {
@@ -545,15 +546,7 @@ static int GBASIOLockstepDriverConnectedDevices(struct GBASIODriver* driver) {
 
 static int GBASIOLockstepDriverDeviceId(struct GBASIODriver* driver) {
 	struct GBASIOLockstepDriver* lockstep = (struct GBASIOLockstepDriver*) driver;
-	struct GBASIOLockstepCoordinator* coordinator = lockstep->coordinator;
-	int playerId = 0;
-	MutexLock(&coordinator->mutex);
-	struct GBASIOLockstepPlayer* player = TableLookup(&coordinator->players, lockstep->lockstepId);
-	if (player && player->playerId >= 0) {
-		playerId = player->playerId;
-	}
-	MutexUnlock(&coordinator->mutex);
-	return playerId;
+	return lockstep->cachedPlayerId;
 }
 
 static uint16_t GBASIOLockstepDriverWriteSIOCNT(struct GBASIODriver* driver, uint16_t value) {
@@ -769,6 +762,7 @@ void _reconfigPlayers(struct GBASIOLockstepCoordinator* coordinator) {
 
 		if (player->playerId != 0) {
 			player->playerId = 0;
+			player->driver->cachedPlayerId = 0;
 			if (player->driver->user->playerIdChanged) {
 				player->driver->user->playerIdChanged(player->driver->user, player->playerId);
 			}
@@ -823,6 +817,7 @@ void _reconfigPlayers(struct GBASIOLockstepCoordinator* coordinator) {
 					coordinator->attachedPlayers[seen] = pid;
 					if (player->playerId != seen) {
 						player->playerId = seen;
+						player->driver->cachedPlayerId = seen;
 						if (player->driver->user->playerIdChanged) {
 							player->driver->user->playerIdChanged(player->driver->user, player->playerId);
 						}

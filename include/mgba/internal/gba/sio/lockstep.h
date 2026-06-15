@@ -82,6 +82,7 @@ struct GBASIOLockstepDriver {
 
 	struct mLockstepUser* user;
 	bool asleep;
+	int cachedPlayerId;
 };
 
 void GBASIOLockstepCoordinatorInit(struct GBASIOLockstepCoordinator*);
