@@ -50,12 +50,15 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Audio-Throttled Video Sync.\n", playerIndex);
-    // 기본 시간 타이밍 장치 (배속 폭주 방지용 베이스라인)
+    printf("WASM: Player %d thread started. Precision Cycle-Chunk with Time Limiter.\n", playerIndex);
+    // GBA 표준 1프레임당 하드웨어 클럭 수
+    const uint32_t CYCLES_PER_FRAME = 280896; 
+    // 정속 구동을 위한 훌륭한 기준점 유지
     double targetFrameTime = 1000.0 / 59.727; 
     double nextFrameTime = emscripten_get_now();
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
+        // [안전장치 1] 락스텝으로 인해 잠든 상태면 조건 변수로 대기
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
         }
@@ -64,20 +67,8 @@ void mgba_run_player(int playerIndex) {
             break;
         }
         if (p->core) {
+            // [핵심 융합 1] 마스터 기기(Player 0)는 정확한 정속도 타이밍 제어를 수행
             if (playerIndex == 0) {
-                struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-                if (audio) {
-                    size_t speakSamples = mAudioBufferAvailable(audio);
-                    // [이중 안전장치] 오디오 샘플이 일정 수준(예: 3000개, 약 3~4프레임 분량) 
-                    // 이상 쌓여있다면, 물리적으로 JS가 소리를 소비할 때까지 
-                    // 시간 타이밍과 관계없이 무조건 연산을 강제로 멈추고 대기시킵니다.
-                    if (speakSamples > 3000) {
-                        pthread_mutex_unlock(&p->mutex);
-                        emscripten_thread_sleep(2); // 2ms 쉬고 다시 체크
-                        continue;
-                    }
-                }
-                // 시간 기반 베이스라인 제한 (오디오 버퍼가 리셋되어 0이 되어도 여기서 배속을 막아줌)
                 double currentTime = emscripten_get_now();
                 if (currentTime < nextFrameTime) {
                     pthread_mutex_unlock(&p->mutex);
@@ -92,11 +83,14 @@ void mgba_run_player(int playerIndex) {
                     nextFrameTime = currentTime;
                 }
             }
-            // 키 입력 및 1프레임 전진
+            // 키 입력 처리
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
-            p->frameRendered = false;
-            while (!p->frameRendered && !p->lockstepDriver.asleep) {
+            // [핵심 융합 2] 싱글 스레드 시절의 정밀 사이클 타겟팅 계산 이식
+            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
+            uint32_t targetCycles = currentCycles + CYCLES_PER_FRAME;
+            // 정확히 280,896 사이클을 다 채우거나, 락스텝으로 인해 asleep이 될 때까지만 몰아서 step 실행
+            while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
                 p->core->step(p->core);
             }
             pthread_mutex_unlock(&p->mutex);
@@ -104,10 +98,12 @@ void mgba_run_player(int playerIndex) {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
         }
+        // 마스터 외의 슬레이브 기기들은 락스텝 동기화 신호를 민첩하게 받기 위해 즉시 양보
         if (playerIndex != 0) {
             emscripten_thread_sleep(0); 
         }
     }
+    printf("WASM: Player %d thread exiting.\n", playerIndex);
 }
 
 static void* player_thread_entry(void* arg) {
