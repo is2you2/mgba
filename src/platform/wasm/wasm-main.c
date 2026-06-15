@@ -74,7 +74,7 @@ void mgba_run_player(int playerIndex) {
                 // 🔥 [모드 A] 멀티플레이 기기 탐색 및 락스텝 (이전 버전 구조)
                 // ==========================================
                 struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-                if (audio && mAudioBufferAvailable(audio) > 1536) {
+                if (audio && mAudioBufferAvailable(audio) > 1428) {
                     pthread_mutex_unlock(&p->mutex);
                     emscripten_thread_sleep(1); 
                     continue;
