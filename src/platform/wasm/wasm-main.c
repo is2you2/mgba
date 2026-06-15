@@ -43,35 +43,49 @@ static struct Player players[MAX_PLAYERS];
 static struct GBASIOLockstepCoordinator coordinator;
 static bool coordinatorInitialized = false;
 
-// 플레이어 실행 루프 (모든 플레이어용)
+#include <emscripten/html5.h> // emscripten_get_now 사용을 위해 추가
+
 EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
 
     printf("WASM: Player %d thread started.\n", playerIndex);
-
+    // 프레임 제한을 위한 변수 (마스터 기기용)
+    double targetFrameTime = 1000.0 / 60.0; // 60 fps -> ~16.666ms
+    double nextFrameTime = emscripten_get_now();
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
-
-        // Lockstep 동기화로 인해 잠든 상태면 조건 변수로 대기 (뮤텍스 자동 해제)
-        while (p->lockstepDriver.asleep) {
+        // 락스텝으로 인해 잠든 상태면 대기
+        while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
         }
-
+        if (!p->active) {
+            pthread_mutex_unlock(&p->mutex);
+            break;
+        }
         if (p->core) {
-            // 오디오 버퍼가 일정 수준 이상 차면 잠시 대기하여 실행 속도 조절 (Throttling)
-            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > 1536) {
-                pthread_mutex_unlock(&p->mutex);
-                emscripten_thread_sleep(1); 
-                continue;
+            // [핵심 변경] 마스터 기기(Player 0)인 경우에만 실시간 정속도(Frame Limiting)를 강제합니다.
+            if (playerIndex == 0) {
+                double currentTime = emscripten_get_now();
+                if (currentTime < nextFrameTime) {
+                    // 아직 다음 프레임 시간이 안 되었다면 뮤텍스를 풀고 남은 시간만큼 대기
+                    pthread_unlock(&p->mutex);
+                    double delay = nextFrameTime - currentTime;
+                    emscripten_thread_sleep((unsigned int)delay);
+                    continue;
+                }
+                // 다음 타겟 프레임 시간 갱신
+                nextFrameTime += targetFrameTime;
+                // 만약 너무 뒤처졌다면 현재 시간으로 보정 (Skip)
+                if (currentTime > nextFrameTime + 100.0) {
+                    nextFrameTime = currentTime;
+                }
             }
-
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
-
-            // 더 작은 단위로 실행하여 오디오 동기화 및 락스텝 반응성 향상
+            // GBA의 1프레임 분량에 해당하는 세부 스텝 진행
+            // 마스터가 스텝을 밟으면 락스텝 코디네이터를 통해 슬레이브(1,2,3)들의 스레드도 깨어나며 동기화됩니다.
             for (int i = 0; i < 50; ++i) {
                 p->core->step(p->core);
                 if (p->lockstepDriver.asleep) break; 
@@ -81,8 +95,13 @@ void mgba_run_player(int playerIndex) {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
         }
+
+        // 다른 플레이어 스레드(1, 2, 3)는 마스터의 SIO 요청(Ack)이 올 때까지 
+        // 별도의 딜레이 없이 루프를 돌며 대기 상태를 유지하게 합니다.
+        if (playerIndex != 0) {
+            emscripten_thread_sleep(0); 
+        }
     }
-    printf("WASM: Player %d thread exiting.\n", playerIndex);
 }
 
 static void* player_thread_entry(void* arg) {
