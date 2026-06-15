@@ -50,7 +50,9 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    double targetFrameTime = 1000.0 / 60.0; 
+    printf("WASM: Player %d thread started. Audio-Throttled Video Sync.\n", playerIndex);
+    // 기본 시간 타이밍 장치 (배속 폭주 방지용 베이스라인)
+    double targetFrameTime = 1000.0 / 59.727; 
     double nextFrameTime = emscripten_get_now();
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
@@ -62,13 +64,24 @@ void mgba_run_player(int playerIndex) {
             break;
         }
         if (p->core) {
-            // 1. 마스터 기기 타이밍 제어 (시간이 안 되었으면 sleep)
             if (playerIndex == 0) {
+                struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+                if (audio) {
+                    size_t speakSamples = mAudioBufferAvailable(audio);
+                    // [이중 안전장치] 오디오 샘플이 일정 수준(예: 3000개, 약 3~4프레임 분량) 
+                    // 이상 쌓여있다면, 물리적으로 JS가 소리를 소비할 때까지 
+                    // 시간 타이밍과 관계없이 무조건 연산을 강제로 멈추고 대기시킵니다.
+                    if (speakSamples > 3000) {
+                        pthread_mutex_unlock(&p->mutex);
+                        emscripten_thread_sleep(2); // 2ms 쉬고 다시 체크
+                        continue;
+                    }
+                }
+                // 시간 기반 베이스라인 제한 (오디오 버퍼가 리셋되어 0이 되어도 여기서 배속을 막아줌)
                 double currentTime = emscripten_get_now();
                 if (currentTime < nextFrameTime) {
                     pthread_mutex_unlock(&p->mutex);
                     double delay = nextFrameTime - currentTime;
-                    // 최소 1ms 이상 남았을 때만 sleep 하여 오버슛 방지
                     if (delay >= 1.0) {
                         emscripten_thread_sleep((unsigned int)delay);
                     }
@@ -79,9 +92,9 @@ void mgba_run_player(int playerIndex) {
                     nextFrameTime = currentTime;
                 }
             }
+            // 키 입력 및 1프레임 전진
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
-            // 2. [핵심 변경] 고정된 50번 루프 대신, 1프레임이 완성될 때까지만 step 실행
             p->frameRendered = false;
             while (!p->frameRendered && !p->lockstepDriver.asleep) {
                 p->core->step(p->core);
