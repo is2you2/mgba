@@ -37,6 +37,7 @@ struct Player {
     pthread_mutex_t mutex;
     pthread_t thread;
     bool active;
+    bool frameRendered;
 };
 
 static struct Player players[MAX_PLAYERS];
@@ -49,14 +50,10 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-
-    printf("WASM: Player %d thread started.\n", playerIndex);
-    // 프레임 제한을 위한 변수 (마스터 기기용)
-    double targetFrameTime = 1000.0 / 60.0; // 60 fps -> ~16.666ms
+    double targetFrameTime = 1000.0 / 60.0; 
     double nextFrameTime = emscripten_get_now();
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
-        // 락스텝으로 인해 잠든 상태면 대기
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
         }
@@ -65,39 +62,35 @@ void mgba_run_player(int playerIndex) {
             break;
         }
         if (p->core) {
-            // [핵심 변경] 마스터 기기(Player 0)인 경우에만 실시간 정속도(Frame Limiting)를 강제합니다.
+            // 1. 마스터 기기 타이밍 제어 (시간이 안 되었으면 sleep)
             if (playerIndex == 0) {
                 double currentTime = emscripten_get_now();
                 if (currentTime < nextFrameTime) {
-                    // 아직 다음 프레임 시간이 안 되었다면 뮤텍스를 풀고 남은 시간만큼 대기
-                    pthread_unlock(&p->mutex);
+                    pthread_mutex_unlock(&p->mutex);
                     double delay = nextFrameTime - currentTime;
-                    emscripten_thread_sleep((unsigned int)delay);
+                    // 최소 1ms 이상 남았을 때만 sleep 하여 오버슛 방지
+                    if (delay >= 1.0) {
+                        emscripten_thread_sleep((unsigned int)delay);
+                    }
                     continue;
                 }
-                // 다음 타겟 프레임 시간 갱신
                 nextFrameTime += targetFrameTime;
-                // 만약 너무 뒤처졌다면 현재 시간으로 보정 (Skip)
                 if (currentTime > nextFrameTime + 100.0) {
                     nextFrameTime = currentTime;
                 }
             }
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
-            // GBA의 1프레임 분량에 해당하는 세부 스텝 진행
-            // 마스터가 스텝을 밟으면 락스텝 코디네이터를 통해 슬레이브(1,2,3)들의 스레드도 깨어나며 동기화됩니다.
-            for (int i = 0; i < 50; ++i) {
+            // 2. [핵심 변경] 고정된 50번 루프 대신, 1프레임이 완성될 때까지만 step 실행
+            p->frameRendered = false;
+            while (!p->frameRendered && !p->lockstepDriver.asleep) {
                 p->core->step(p->core);
-                if (p->lockstepDriver.asleep) break; 
             }
             pthread_mutex_unlock(&p->mutex);
         } else {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
         }
-
-        // 다른 플레이어 스레드(1, 2, 3)는 마스터의 SIO 요청(Ack)이 올 때까지 
-        // 별도의 딜레이 없이 루프를 돌며 대기 상태를 유지하게 합니다.
         if (playerIndex != 0) {
             emscripten_thread_sleep(0); 
         }
@@ -149,21 +142,19 @@ int mgba_init() {
     return 1;
 }
 
+// 비디오 프레임이 끝났을 때 호출되는 콜백 함수 수정
 static void wasm_video_frame_ended(void* context) {
     struct Player* p = (struct Player*)context;
-    // Note: This callback is called from p->core->step(), which is called from 
-    // mgba_run_player() while holding p->mutex.
     if (p->videoBuffers[0] && p->videoBuffers[1]) {
-        // Apply alpha correction to the buffer that just finished
         uint32_t* finishedBuffer = p->videoBuffers[p->currentBuffer];
         for (unsigned j = 0; j < p->videoWidth * p->videoHeight; ++j) {
             finishedBuffer[j] |= 0xFF000000;
         }
-
-        // Swap buffers
         p->currentBuffer = 1 - p->currentBuffer;
         p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
         p->newFrameAvailable = true;
+        // [중요] 코어가 1프레임 분량의 그리기를 마쳤음을 표시
+        p->frameRendered = true; 
     }
 }
 
