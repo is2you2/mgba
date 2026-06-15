@@ -306,9 +306,15 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         });
 
         const handleKey = (e, pressed) => {
-            if (players[focusedPlayerIndex]?.active && KEY_MAP[e.key] !== undefined) {
-                // 직접 WASM 함수 호출 (메모리 공유 및 멀티스레딩이므로 안전)
-                emulator.setButton(focusedPlayerIndex, KEY_MAP[e.key], pressed);
+            if (pressed && e.repeat) return;
+            if (players[focusedPlayerIndex]?.active &&
+                KEY_MAP[e.key] !== undefined
+            ) {
+                emulator.setButton(
+                    focusedPlayerIndex,
+                    KEY_MAP[e.key],
+                    pressed
+                );
                 e.preventDefault();
             }
         };
