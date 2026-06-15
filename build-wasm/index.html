@@ -207,8 +207,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             const uint8Array = new Uint8Array(buffer);
 
             for (let i = 0, j = MAX_PLAYERS; i < j; i++) {
-                // 로드할 때 모든 활성 플레이어에 대해 처리하거나 특정 플레이어에만 처리
-                // 여기서는 업로드한 인덱스에 해당하는 플레이어에 로드
                 const ptr = Module._malloc(uint8Array.length);
                 Module.HEAPU8.set(uint8Array, ptr);
                 const success = emulator.loadRom(i, ptr, uint8Array.length);

@@ -37,7 +37,6 @@ struct Player {
     pthread_mutex_t mutex;
     pthread_t thread;
     bool active;
-    bool frameRendered;
 };
 
 static struct Player players[MAX_PLAYERS];
@@ -45,9 +44,6 @@ static struct GBASIOLockstepCoordinator coordinator;
 static bool coordinatorInitialized = false;
 
 #include <emscripten/html5.h> // emscripten_get_now 사용을 위해 추가
-
-/* Copyright (c) 2026 Choi Sung soo
- * 이 수정 코드는 싱글플레이어 정속도와 멀티플레이어 기기 탐색 고속 처리를 동적으로 융합합니다. */
 
 EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
@@ -191,8 +187,6 @@ static void wasm_video_frame_ended(void* context) {
         p->currentBuffer = 1 - p->currentBuffer;
         p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
         p->newFrameAvailable = true;
-        // [중요] 코어가 1프레임 분량의 그리기를 마쳤음을 표시
-        p->frameRendered = true; 
     }
 }
 
