@@ -46,19 +46,21 @@ static bool coordinatorInitialized = false;
 
 #include <emscripten/html5.h> // emscripten_get_now 사용을 위해 추가
 
+/* Copyright (c) 2026 Choi Sung soo
+ * 이 수정 코드는 싱글플레이어 정속도와 멀티플레이어 기기 탐색 고속 처리를 동적으로 융합합니다. */
+
 EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Precision Cycle-Chunk with Time Limiter.\n", playerIndex);
-    // GBA 표준 1프레임당 하드웨어 클럭 수
+    printf("WASM: Player %d thread started. Dynamic Hybrid Sync Active.\n", playerIndex);
+    // 정속 구동용 타이밍 변수 (현재 버전 소스 이식)
     const uint32_t CYCLES_PER_FRAME = 280896; 
-    // 정속 구동을 위한 훌륭한 기준점 유지
     double targetFrameTime = 1000.0 / 59.727; 
     double nextFrameTime = emscripten_get_now();
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
-        // [안전장치 1] 락스텝으로 인해 잠든 상태면 조건 변수로 대기
+        // [현재 버전 안전장치] Lockstep 동기화로 잠든 상태면 조건 변수 대기
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
         }
@@ -67,40 +69,67 @@ void mgba_run_player(int playerIndex) {
             break;
         }
         if (p->core) {
-            // [핵심 융합 1] 마스터 기기(Player 0)는 정확한 정속도 타이밍 제어를 수행
-            if (playerIndex == 0) {
-                double currentTime = emscripten_get_now();
-                if (currentTime < nextFrameTime) {
+            // 💡 핵심 스위치: 현재 코디네이터에 연결된 기기가 2대 이상인지 체크
+            // 기기 탐색 및 멀티플레이 락스텝 활성화 여부를 감지합니다.
+            bool isMultiplayer = (coordinatorInitialized && coordinator.nAttached >= 2);
+
+            if (isMultiplayer) {
+                // ==========================================
+                // 🔥 [모드 A] 멀티플레이 기기 탐색 및 락스텝 (이전 버전 구조)
+                // ==========================================
+                struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+                if (audio && mAudioBufferAvailable(audio) > 1536) {
                     pthread_mutex_unlock(&p->mutex);
-                    double delay = nextFrameTime - currentTime;
-                    if (delay >= 1.0) {
-                        emscripten_thread_sleep((unsigned int)delay);
-                    }
+                    emscripten_thread_sleep(1); 
                     continue;
                 }
-                nextFrameTime += targetFrameTime;
-                if (currentTime > nextFrameTime + 100.0) {
-                    nextFrameTime = currentTime;
+
+                p->core->clearKeys(p->core, 0x3FF);
+                p->core->addKeys(p->core, p->inputState);
+
+                // 이전 버전의 50사이클 쪼개기로 반응성 극대화 및 고속 탐색 프리패스
+                for (int i = 0; i < 50; ++i) {
+                    p->core->step(p->core);
+                    if (p->lockstepDriver.asleep) break; 
                 }
+                pthread_mutex_unlock(&p->mutex);
+
+                // 슬레이브 기기들의 민첩한 컨텍스트 스위칭 유도
+                if (playerIndex != 0) {
+                    emscripten_thread_sleep(0);
+                }
+            } else {
+                // ==========================================
+                // 🛡️ [모드 B] 싱글 플레이어 (현재 버전 구조)
+                // ==========================================
+                if (playerIndex == 0) {
+                    double currentTime = emscripten_get_now();
+                    if (currentTime < nextFrameTime) {
+                        pthread_mutex_unlock(&p->mutex);
+                        double delay = nextFrameTime - currentTime;
+                        if (delay >= 1.0) {
+                            emscripten_thread_sleep((unsigned int)delay);
+                        }
+                        continue;
+                    }
+                    nextFrameTime += targetFrameTime;
+                    if (currentTime > nextFrameTime + 100.0) {
+                        nextFrameTime = currentTime;
+                    }
+                }
+                p->core->clearKeys(p->core, 0x3FF);
+                p->core->addKeys(p->core, p->inputState);
+                // 싱글 모드일 때는 깔끔하게 1프레임 단위 통째로 구동하여 프레임 안정화
+                uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
+                uint32_t targetCycles = currentCycles + CYCLES_PER_FRAME;
+                while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                    p->core->step(p->core);
+                }
+                pthread_mutex_unlock(&p->mutex);
             }
-            // 키 입력 처리
-            p->core->clearKeys(p->core, 0x3FF);
-            p->core->addKeys(p->core, p->inputState);
-            // [핵심 융합 2] 싱글 스레드 시절의 정밀 사이클 타겟팅 계산 이식
-            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
-            uint32_t targetCycles = currentCycles + CYCLES_PER_FRAME;
-            // 정확히 280,896 사이클을 다 채우거나, 락스텝으로 인해 asleep이 될 때까지만 몰아서 step 실행
-            while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                p->core->step(p->core);
-            }
-            pthread_mutex_unlock(&p->mutex);
         } else {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
-        }
-        // 마스터 외의 슬레이브 기기들은 락스텝 동기화 신호를 민첩하게 받기 위해 즉시 양보
-        if (playerIndex != 0) {
-            emscripten_thread_sleep(0); 
         }
     }
     printf("WASM: Player %d thread exiting.\n", playerIndex);
