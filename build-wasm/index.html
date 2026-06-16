@@ -236,9 +236,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         async function handleRomUpload(e) {
             const file = e.target.files[0];
             const index = parseInt(e.target.dataset.index);
-            if (index == 0) {
-                window.onSavedataUpdated(0);
-            }
+
             if (!file || !emulator) return;
 
             const romName = file.name.replace(/\.[^/.]+$/, "");
