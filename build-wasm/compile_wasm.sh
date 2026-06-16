@@ -16,8 +16,10 @@ emcc ../src/platform/wasm/wasm-main.c libmgba.a \
     -s USE_PTHREADS=1 \
     -s PTHREAD_POOL_SIZE=4 \
     -s MODULARIZE=1 \
+    # ------ 아래 두줄은 샌드박스 빌드시 삭제합니다
     -s EXPORT_ES6=1 \
     -s USE_ES6_IMPORT_META=1 \
+    # ------
     -s EXPORT_NAME='createMGBA' \
     -s INITIAL_MEMORY=128MB \
     -s ALLOW_MEMORY_GROWTH=1 \
