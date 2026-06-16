@@ -49,80 +49,80 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Dynamic Hybrid Sync Active.\n", playerIndex);
-    // 정속 구동용 타이밍 변수 (현재 버전 소스 이식)
-    const uint32_t CYCLES_PER_FRAME = 280896; 
+    printf("WASM: Player %d thread started. Hybrid Timing Active.\n", playerIndex);
+
+    const uint32_t CYCLES_PER_FRAME = 280896;
+    const uint32_t SYNC_THRESHOLD = 512; // Cycles between lockstep checks/yields
+    const size_t AUDIO_THRESHOLD = 1500; // Max audio samples before backpressure
+    
     double targetFrameTime = 1000.0 / 59.727; 
     double nextFrameTime = emscripten_get_now();
+
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
-        // [현재 버전 안전장치] Lockstep 동기화로 잠든 상태면 조건 변수 대기
+
+        // [Wait Step] Handle lockstep synchronization sleep
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
         }
+
         if (!p->active) {
             pthread_mutex_unlock(&p->mutex);
             break;
         }
-        if (p->core) {
-            // 💡 핵심 스위치: 현재 코디네이터에 연결된 기기가 2대 이상인지 체크
-            // 기기 탐색 및 멀티플레이 락스텝 활성화 여부를 감지합니다.
-            bool isMultiplayer = (coordinatorInitialized && coordinator.nAttached >= 2);
 
-            if (isMultiplayer) {
-                // ==========================================
-                // 🔥 [모드 A] 멀티플레이 기기 탐색 및 락스텝 (이전 버전 구조)
-                // ==========================================
-                struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-                if (audio && mAudioBufferAvailable(audio) > 1428) {
+        if (p->core) {
+            // 1. Audio Backpressure: Slow down if buffer is getting full to prevent jitter
+            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+            if (audio && mAudioBufferAvailable(audio) > AUDIO_THRESHOLD) {
+                pthread_mutex_unlock(&p->mutex);
+                emscripten_thread_sleep(1); 
+                continue;
+            }
+
+            // 2. Master (Player 0) Wall-Clock Throttling
+            // By regulating the master, the entire lockstep session stays at ~60fps.
+            if (playerIndex == 0) {
+                double currentTime = emscripten_get_now();
+                if (currentTime < nextFrameTime) {
                     pthread_mutex_unlock(&p->mutex);
-                    emscripten_thread_sleep(1); 
+                    double delay = nextFrameTime - currentTime;
+                    if (delay >= 1.0) {
+                        emscripten_thread_sleep((unsigned int)delay);
+                    } else {
+                        emscripten_thread_sleep(0);
+                    }
                     continue;
                 }
-
-                p->core->clearKeys(p->core, 0x3FF);
-                p->core->addKeys(p->core, p->inputState);
-
-                // 이전 버전의 50사이클 쪼개기로 반응성 극대화 및 고속 탐색 프리패스
-                for (int i = 0; i < 50; ++i) {
-                    p->core->step(p->core);
-                    if (p->lockstepDriver.asleep) break; 
+                nextFrameTime += targetFrameTime;
+                if (currentTime > nextFrameTime + 100.0) {
+                    nextFrameTime = currentTime;
                 }
-                pthread_mutex_unlock(&p->mutex);
-
-                // 슬레이브 기기들의 민첩한 컨텍스트 스위칭 유도
-                if (playerIndex != 0) {
-                    emscripten_thread_sleep(0);
-                }
-            } else {
-                // ==========================================
-                // 🛡️ [모드 B] 싱글 플레이어 (현재 버전 구조)
-                // ==========================================
-                if (playerIndex == 0) {
-                    double currentTime = emscripten_get_now();
-                    if (currentTime < nextFrameTime) {
-                        pthread_mutex_unlock(&p->mutex);
-                        double delay = nextFrameTime - currentTime;
-                        if (delay >= 1.0) {
-                            emscripten_thread_sleep((unsigned int)delay);
-                        }
-                        continue;
-                    }
-                    nextFrameTime += targetFrameTime;
-                    if (currentTime > nextFrameTime + 100.0) {
-                        nextFrameTime = currentTime;
-                    }
-                }
-                p->core->clearKeys(p->core, 0x3FF);
-                p->core->addKeys(p->core, p->inputState);
-                // 싱글 모드일 때는 깔끔하게 1프레임 단위 통째로 구동하여 프레임 안정화
-                uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
-                uint32_t targetCycles = currentCycles + CYCLES_PER_FRAME;
-                while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                    p->core->step(p->core);
-                }
-                pthread_mutex_unlock(&p->mutex);
             }
+
+            p->core->clearKeys(p->core, 0x3FF);
+            p->core->addKeys(p->core, p->inputState);
+
+            // 3. Execution Loop (Frame-based with SYNC_THRESHOLD checks)
+            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
+            uint32_t targetCycles = currentCycles + CYCLES_PER_FRAME;
+
+            while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                uint32_t batchStart = mTimingCurrentTime(p->core->timing);
+                // Step in chunks to balance mutex overhead vs sync latency
+                while ((int32_t)(mTimingCurrentTime(p->core->timing) - batchStart) < (int32_t)SYNC_THRESHOLD && !p->lockstepDriver.asleep) {
+                    p->core->step(p->core);
+                }
+
+                // In multiplayer, yield frequently to allow other players to run
+                if (coordinatorInitialized && coordinator.nAttached >= 2) {
+                    pthread_mutex_unlock(&p->mutex);
+                    emscripten_thread_sleep(0);
+                    pthread_mutex_lock(&p->mutex);
+                    if (p->lockstepDriver.asleep) break;
+                }
+            }
+            pthread_mutex_unlock(&p->mutex);
         } else {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
