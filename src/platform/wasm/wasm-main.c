@@ -49,11 +49,12 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Cycle Budgeting Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. Optimized Cycle Budgeting Active.\n", playerIndex);
 
-    const double CYCLES_PER_SECOND = 16777216.0; // GBA clock speed
+    const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
-    const uint32_t MAX_CYCLE_BUDGET = 280896 * 2; // Max 2 frames of catch-up to prevent runaway
+    const uint32_t MAX_CYCLE_BUDGET = 280896 * 2;
+    const uint32_t MIN_BUDGET_THRESHOLD = 2048; // Minimum cycles to execute to reduce loop overhead
     const size_t AUDIO_SAFE_LIMIT = 2048;
 
     double startTime = emscripten_get_now();
@@ -62,11 +63,8 @@ void mgba_run_player(int playerIndex) {
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
 
-        // 1. Lockstep synchronization wait
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
-            // After waking up, reset the timeline if we were asleep for too long
-            // to prevent a massive jump in cycles.
             double currentTime = emscripten_get_now();
             double elapsed = currentTime - startTime;
             uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
@@ -81,22 +79,17 @@ void mgba_run_player(int playerIndex) {
         }
 
         if (p->core) {
-            // 2. Calculate Cycle Budget based on Wall-Clock Time
             double currentTime = emscripten_get_now();
             double elapsed = currentTime - startTime;
             uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
             
             int64_t budget = (int64_t)(targetTotalCycles - totalCyclesExecuted);
 
-            // Cap the budget to prevent massive catch-up spikes (which cause audio crackling)
             if (budget > (int64_t)MAX_CYCLE_BUDGET) {
                 budget = MAX_CYCLE_BUDGET;
-                // Re-align startTime to prevent building up infinite debt
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
             }
 
-            // 3. Audio Backpressure (Refinement)
-            // If audio is too full, we must NOT add more to the budget.
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
             if (audio && mAudioBufferAvailable(audio) > AUDIO_SAFE_LIMIT) {
                 pthread_mutex_unlock(&p->mutex);
@@ -104,19 +97,19 @@ void mgba_run_player(int playerIndex) {
                 continue;
             }
 
-            if (budget <= 0) {
+            // CPU Optimization: If we are ahead of schedule, sleep instead of tight polling
+            if (budget < (int64_t)MIN_BUDGET_THRESHOLD) {
                 pthread_mutex_unlock(&p->mutex);
-                // Yield very briefly to wait for next cycle budget
-                emscripten_thread_sleep(0);
+                // Calculate sleep time to reach at least MIN_BUDGET_THRESHOLD
+                double sleepMs = (double)(MIN_BUDGET_THRESHOLD - budget) / MS_TO_CYCLES;
+                if (sleepMs < 1.0) sleepMs = 0;
+                emscripten_thread_sleep((unsigned int)sleepMs);
                 continue;
             }
 
-            // 4. Input handling
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
 
-            // 5. Execution Loop
-            // Run exactly the number of cycles allowed by our budget.
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
 
@@ -129,7 +122,7 @@ void mgba_run_player(int playerIndex) {
 
             pthread_mutex_unlock(&p->mutex);
 
-            // In multiplayer, yield between budget runs to allow other threads access to the coordinator
+            // Yield to other threads periodically
             if (coordinatorInitialized && coordinator.nAttached >= 2) {
                 emscripten_thread_sleep(0);
             }
