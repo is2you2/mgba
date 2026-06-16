@@ -49,21 +49,30 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Hybrid Timing Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. Cycle Budgeting Active.\n", playerIndex);
 
-    const uint32_t CYCLES_PER_FRAME = 280896;
-    const uint32_t SYNC_THRESHOLD = 512; // Cycles between lockstep checks/yields
-    const size_t AUDIO_THRESHOLD = 1500; // Max audio samples before backpressure
-    
-    double targetFrameTime = 1000.0 / 59.727; 
-    double nextFrameTime = emscripten_get_now();
+    const double CYCLES_PER_SECOND = 16777216.0; // GBA clock speed
+    const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
+    const uint32_t MAX_CYCLE_BUDGET = 280896 * 2; // Max 2 frames of catch-up to prevent runaway
+    const size_t AUDIO_SAFE_LIMIT = 2048;
+
+    double startTime = emscripten_get_now();
+    uint64_t totalCyclesExecuted = 0;
 
     while (p->active) {
         pthread_mutex_lock(&p->mutex);
 
-        // [Wait Step] Handle lockstep synchronization sleep
+        // 1. Lockstep synchronization wait
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
+            // After waking up, reset the timeline if we were asleep for too long
+            // to prevent a massive jump in cycles.
+            double currentTime = emscripten_get_now();
+            double elapsed = currentTime - startTime;
+            uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
+            if (targetTotalCycles > totalCyclesExecuted + MAX_CYCLE_BUDGET) {
+                startTime = currentTime - (double)totalCyclesExecuted / MS_TO_CYCLES;
+            }
         }
 
         if (!p->active) {
@@ -72,57 +81,58 @@ void mgba_run_player(int playerIndex) {
         }
 
         if (p->core) {
-            // 1. Audio Backpressure: Slow down if buffer is getting full to prevent jitter
+            // 2. Calculate Cycle Budget based on Wall-Clock Time
+            double currentTime = emscripten_get_now();
+            double elapsed = currentTime - startTime;
+            uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
+            
+            int64_t budget = (int64_t)(targetTotalCycles - totalCyclesExecuted);
+
+            // Cap the budget to prevent massive catch-up spikes (which cause audio crackling)
+            if (budget > (int64_t)MAX_CYCLE_BUDGET) {
+                budget = MAX_CYCLE_BUDGET;
+                // Re-align startTime to prevent building up infinite debt
+                startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
+            }
+
+            // 3. Audio Backpressure (Refinement)
+            // If audio is too full, we must NOT add more to the budget.
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > AUDIO_THRESHOLD) {
+            if (audio && mAudioBufferAvailable(audio) > AUDIO_SAFE_LIMIT) {
                 pthread_mutex_unlock(&p->mutex);
-                emscripten_thread_sleep(1); 
+                emscripten_thread_sleep(1);
                 continue;
             }
 
-            // 2. Master (Player 0) Wall-Clock Throttling
-            // By regulating the master, the entire lockstep session stays at ~60fps.
-            if (playerIndex == 0) {
-                double currentTime = emscripten_get_now();
-                if (currentTime < nextFrameTime) {
-                    pthread_mutex_unlock(&p->mutex);
-                    double delay = nextFrameTime - currentTime;
-                    if (delay >= 1.0) {
-                        emscripten_thread_sleep((unsigned int)delay);
-                    } else {
-                        emscripten_thread_sleep(0);
-                    }
-                    continue;
-                }
-                nextFrameTime += targetFrameTime;
-                if (currentTime > nextFrameTime + 100.0) {
-                    nextFrameTime = currentTime;
-                }
+            if (budget <= 0) {
+                pthread_mutex_unlock(&p->mutex);
+                // Yield very briefly to wait for next cycle budget
+                emscripten_thread_sleep(0);
+                continue;
             }
 
+            // 4. Input handling
             p->core->clearKeys(p->core, 0x3FF);
             p->core->addKeys(p->core, p->inputState);
 
-            // 3. Execution Loop (Frame-based with SYNC_THRESHOLD checks)
-            uint32_t currentCycles = mTimingCurrentTime(p->core->timing);
-            uint32_t targetCycles = currentCycles + CYCLES_PER_FRAME;
+            // 5. Execution Loop
+            // Run exactly the number of cycles allowed by our budget.
+            uint32_t startCycles = mTimingCurrentTime(p->core->timing);
+            uint32_t endCycles = startCycles + (uint32_t)budget;
 
-            while ((int32_t)(targetCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                uint32_t batchStart = mTimingCurrentTime(p->core->timing);
-                // Step in chunks to balance mutex overhead vs sync latency
-                while ((int32_t)(mTimingCurrentTime(p->core->timing) - batchStart) < (int32_t)SYNC_THRESHOLD && !p->lockstepDriver.asleep) {
-                    p->core->step(p->core);
-                }
-
-                // In multiplayer, yield frequently to allow other players to run
-                if (coordinatorInitialized && coordinator.nAttached >= 2) {
-                    pthread_mutex_unlock(&p->mutex);
-                    emscripten_thread_sleep(0);
-                    pthread_mutex_lock(&p->mutex);
-                    if (p->lockstepDriver.asleep) break;
-                }
+            while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                p->core->step(p->core);
             }
+
+            uint32_t actualExecuted = mTimingCurrentTime(p->core->timing) - startCycles;
+            totalCyclesExecuted += actualExecuted;
+
             pthread_mutex_unlock(&p->mutex);
+
+            // In multiplayer, yield between budget runs to allow other threads access to the coordinator
+            if (coordinatorInitialized && coordinator.nAttached >= 2) {
+                emscripten_thread_sleep(0);
+            }
         } else {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
