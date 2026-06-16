@@ -75,11 +75,14 @@ static void wasm_video_frame_ended(void* context) {
 
 // --- Main Player Loop ---
 
+// =================================================================
+// 1. 메인 루프 내부: 완벽한 정속 제어 및 오디오 보호 락 메커니즘
+// =================================================================
 EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Ultimate Hybrid Sync Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. Perfect Audio-Lock Mode Active.\n", playerIndex);
 
     // 싱글플레이 전용 타이밍 변수
     const double CYCLES_PER_SECOND = 16777216.0;
@@ -90,30 +93,25 @@ void mgba_run_player(int playerIndex) {
 
     while (atomic_load(&p->active)) {
         
-        // =================================================================
-        // [1] 락스텝 슬립 상태 처리 (마스터/슬레이브 동기화 락 인터록)
-        // =================================================================
+        // [1] 락스텝 슬립 상태 처리
         if (p->lockstepDriver.asleep) {
             pthread_mutex_lock(&p->mutex);
             while (p->lockstepDriver.asleep && atomic_load(&p->active)) {
-                // 마스터 노드가 깨어났으나 시그널을 놓쳤을 때를 위한 초고속 해제 안전장치
                 if (coordinatorInitialized && p->lockstepDriver.lockstepId == coordinator.attachedPlayers[0] && coordinator.waiting == 0) {
                     p->lockstepDriver.asleep = false;
                     break;
                 }
-                // 멀티플레이 시에는 긴 대기 대신 짧은 조건 변수 대기 수행
                 pthread_cond_wait(&p->cond, &p->mutex);
             }
             pthread_mutex_unlock(&p->mutex);
             
-            // 깨어난 후 싱글플레이용 시간축만 갱신
             double currentTime = emscripten_get_now();
             startTime = currentTime - (double)totalCyclesExecuted / MS_TO_CYCLES;
         }
 
         if (!atomic_load(&p->active)) break;
 
-        // 코어 존재 여부 체크를 위한 최소한의 임계 구역
+        // 에뮬레이션 상태 확인 및 오디오 체크를 위한 안전한 락 획득
         pthread_mutex_lock(&p->mutex);
         if (!p->core) {
             pthread_mutex_unlock(&p->mutex);
@@ -121,55 +119,48 @@ void mgba_run_player(int playerIndex) {
             continue;
         }
 
-        // 실시간 멀티플레이 상태 감지
         bool isMultiplayer = coordinatorInitialized && coordinator.nAttached > 1;
         bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
 
-        // =================================================================
-        // [2] 오디오 동기화 및 오버플로우 방지 (멀티플레이 정속 구동의 핵심)
-        // =================================================================
+        // ⭐ [핵심 개선] 오디오 동기화 및 가속 억제 구조화
         struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
         if (audio) {
-            size_t availableSamples = mAudioBufferAvailable(audio);
-            // 멀티플레이어일 때는 버퍼 임계치를 엄격하게 잡아 가속을 원천 차단 (약 2~3프레임 분량)
-            size_t audioThreshold = isMultiplayer ? 3072 : 12288; 
+            size_t availablePairs = mAudioBufferAvailable(audio);
+            // 멀티플레이 시 약 1~1.5프레임 분량인 1024 샘플 쌍으로 극단적인 제어 수행
+            size_t audioThreshold = isMultiplayer ? 1024 : 12288; 
             
-            if (availableSamples > audioThreshold) {
-                // 중요: 이 상태에서 강제로 잠들면 병목이 생기므로, 
-                // 락을 풀고 타 스레드에게 즉시 양보(yield)한 뒤 루프를 다시 돕니다.
+            if (availablePairs > audioThreshold) {
+                // 브라우저가 사운드를 채가서 버퍼가 비워질 때까지 현재 스레드를 완벽히 정지
+                while (mAudioBufferAvailable(audio) > audioThreshold && atomic_load(&p->active)) {
+                    pthread_cond_wait(&p->cond, &p->mutex);
+                }
+                // 깨어난 후 안전하게 상태를 재확인하기 위해 루프 처음으로 리턴
                 pthread_mutex_unlock(&p->mutex);
-                emscripten_thread_sleep(0); 
                 continue;
             }
         }
 
-        // 키 입력 처리 (락 프리 아토믹 반영)
+        // 입력 상태 안전하게 주입 (락을 쥐고 있으므로 레이스 컨디션 방지)
         p->core->clearKeys(p->core, 0x3FF);
         p->core->addKeys(p->core, (uint16_t)atomic_load(&p->inputState));
 
-        // =================================================================
-        // [3] 모드별 에뮬레이션 구동 분기
-        // =================================================================
-        if (isMultiplayer) {
-            // ⭐ [멀티플레이 모드]: 시간 기반 Budget 계산을 완전히 배제합니다.
-            // 락스텝 협력 구조와 오디오 버퍼 한계치 제어만으로 정속을 유지합니다.
-            pthread_mutex_unlock(&p->mutex);
+        // 구동 구역 진입 전 락 해제 (멀티플레이 락스텝 통신을 위해 타 스레드에 양보)
+        pthread_mutex_unlock(&p->mutex);
 
+        // [3] 모드별 에뮬레이션 구동
+        if (isMultiplayer) {
             if (isTransferActive) {
-                // 직렬 통신 데이터 교환 중(가장 민감함): 
-                // 1 스텝씩만 정밀하게 밟고 즉시 스레드 컨텍스트를 전환하여 무한 Ack 대기를 방지
                 p->core->step(p->core);
                 emscripten_thread_sleep(0);
             } else {
-                // 일반 멀티플레이 상태: mGBA 내부 인터록이 걸릴 때까지 1프레임 단위 유연 구동
                 p->core->runLoop(p->core);
-                // 슬레이브 기기들의 민첩한 패킷 처리를 위해 매 프레임 끝날 때마다 힌트 부여
                 if (playerIndex != 0) {
                     emscripten_thread_sleep(0);
                 }
             }
         } else {
-            // 🛡️ [싱글플레이 모드]: 정밀한 60Hz 시간 버젯 기반 구동 (기존 안정성 유지)
+            // 싱글플레이 모드: 정밀한 시간축 버젯 제어
+            pthread_mutex_lock(&p->mutex);
             double currentTime = emscripten_get_now();
             double elapsed = currentTime - startTime;
             uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
@@ -180,7 +171,6 @@ void mgba_run_player(int playerIndex) {
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
             }
 
-            // 구동할 사이클이 부족하면 락을 풀고 브라우저 타이머 해상도만큼 대기
             if (budget < (int64_t)16384) {
                 pthread_mutex_unlock(&p->mutex);
                 double sleepMs = (double)(16384 - budget) / MS_TO_CYCLES;
@@ -190,7 +180,7 @@ void mgba_run_player(int playerIndex) {
 
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
-
+            pthread_unlock:
             pthread_mutex_unlock(&p->mutex);
 
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
@@ -335,23 +325,33 @@ void mgba_set_button(int playerIndex, int button, int pressed) {
     pthread_cond_signal(&p->cond);
 }
 
+// =================================================================
+// 2. 외부 오디오 소비 API: 동시성 보호 강화
+// =================================================================
 EMSCRIPTEN_KEEPALIVE
 int mgba_get_audio_samples(int playerIndex, int16_t* outBuffer, size_t maxSamples) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
     struct Player* p = &players[playerIndex];
     if (!p->core) return 0;
 
+    // 메인 루프가 데이터를 쓰는 도중 가로채지 못하도록 강한 Mutex 잠금 보장
     pthread_mutex_lock(&p->mutex);
     struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
     if (!audio) {
         pthread_mutex_unlock(&p->mutex);
         return 0;
     }
+    
     size_t availablePairs = mAudioBufferAvailable(audio);
     if (availablePairs * 2 > maxSamples) availablePairs = maxSamples / 2;
+    
+    // 안전하게 동기화된 상태에서 사운드 데이터를 읽어갑니다 (지직임 근본적 해결)
     mAudioBufferRead(audio, outBuffer, availablePairs);
+    
+    // 오디오가 정상 소비되어 버퍼가 비워졌으므로 잠들어 있던 코어 스레드를 깨움
+    pthread_cond_broadcast(&p->cond); 
     pthread_mutex_unlock(&p->mutex);
-    pthread_cond_signal(&p->cond);
+    
     return (int)(availablePairs * 2);
 }
 
