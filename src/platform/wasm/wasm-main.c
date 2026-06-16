@@ -54,7 +54,7 @@ void mgba_run_player(int playerIndex) {
     const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
     const uint32_t MAX_CYCLE_BUDGET = 280896 * 2;
-    const uint32_t MIN_BUDGET_THRESHOLD = 2048; // Minimum cycles to execute to reduce loop overhead
+    const uint32_t MIN_BUDGET_THRESHOLD = 16384; // Increased threshold (~1ms) to reduce loop overhead
     const size_t AUDIO_SAFE_LIMIT = 2048;
 
     double startTime = emscripten_get_now();
@@ -79,6 +79,14 @@ void mgba_run_player(int playerIndex) {
         }
 
         if (p->core) {
+            // Audio Sync: Use condition variable to wait if buffer is full instead of polling
+            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+            if (audio && mAudioBufferAvailable(audio) > AUDIO_SAFE_LIMIT) {
+                pthread_cond_wait(&p->cond, &p->mutex);
+                pthread_mutex_unlock(&p->mutex);
+                continue;
+            }
+
             double currentTime = emscripten_get_now();
             double elapsed = currentTime - startTime;
             uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
@@ -90,19 +98,11 @@ void mgba_run_player(int playerIndex) {
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
             }
 
-            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > AUDIO_SAFE_LIMIT) {
-                pthread_mutex_unlock(&p->mutex);
-                emscripten_thread_sleep(1);
-                continue;
-            }
-
-            // CPU Optimization: If we are ahead of schedule, sleep instead of tight polling
+            // CPU Optimization: If we are ahead of schedule, sleep for a meaningful amount of time
             if (budget < (int64_t)MIN_BUDGET_THRESHOLD) {
                 pthread_mutex_unlock(&p->mutex);
-                // Calculate sleep time to reach at least MIN_BUDGET_THRESHOLD
                 double sleepMs = (double)(MIN_BUDGET_THRESHOLD - budget) / MS_TO_CYCLES;
-                if (sleepMs < 1.0) sleepMs = 0;
+                if (sleepMs < 1.0) sleepMs = 1.0; 
                 emscripten_thread_sleep((unsigned int)sleepMs);
                 continue;
             }
@@ -113,6 +113,7 @@ void mgba_run_player(int playerIndex) {
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
 
+            // Execute cycles in larger chunks if not in lockstep or if needed
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
                 p->core->step(p->core);
             }
@@ -121,11 +122,7 @@ void mgba_run_player(int playerIndex) {
             totalCyclesExecuted += actualExecuted;
 
             pthread_mutex_unlock(&p->mutex);
-
-            // Yield to other threads periodically
-            if (coordinatorInitialized && coordinator.nAttached >= 2) {
-                emscripten_thread_sleep(0);
-            }
+            // Removed emscripten_thread_sleep(0) to avoid unnecessary yielding when working
         } else {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
@@ -142,18 +139,16 @@ static void* player_thread_entry(void* arg) {
 
 // 멀티 스레드 WASM 환경을 위한 락스텝 콜백 함수
 static void wasm_lockstep_sleep(struct mLockstepUser* user) {
-    // 중요: 이 콜백은 lockstep.c 내부에서 coordinator->mutex를 쥐고 호출됩니다.
-    // 여기서 pthread_cond_wait 등으로 블록하면 다른 스레드가 coordinator->mutex를 얻지 못해 
-    // Ack를 보낼 수 없게 되고 결국 전체 시스템이 데드락에 빠집니다.
-    // 따라서 여기서는 블록하지 않고 즉시 리턴하며, 실제 대기는 mgba_run_player 루프에서 수행합니다.
-    (void)user;
+    // 중요: 이 콜백은 coordinator->mutex를 쥐고 호출됩니다.
+    // p->mutex를 여기서 잡으면 AB-BA 데드락이 발생할 수 있으므로 시그널만 보냅니다.
+    struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
+    pthread_cond_signal(&p->cond);
 }
 
 static void wasm_lockstep_wake(struct mLockstepUser* user) {
+    // 중요: 위와 동일한 이유로 p->mutex를 잡지 않고 시그널만 보냅니다.
     struct Player* p = (struct Player*)((char*)user - offsetof(struct Player, lockstepUser));
-    pthread_mutex_lock(&p->mutex);
     pthread_cond_signal(&p->cond);
-    pthread_mutex_unlock(&p->mutex);
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -318,6 +313,10 @@ int mgba_get_audio_samples(int playerIndex, int16_t* outBuffer, size_t maxSample
     size_t availablePairs = mAudioBufferAvailable(audio);
     if (availablePairs * 2 > maxSamples) availablePairs = maxSamples / 2;
     mAudioBufferRead(audio, outBuffer, availablePairs);
+    
+    // Signal the emulator thread that we have consumed audio and there is space in the buffer
+    pthread_cond_signal(&p->cond);
+    
     pthread_mutex_unlock(&p->mutex);
 
     return (int)(availablePairs * 2);
