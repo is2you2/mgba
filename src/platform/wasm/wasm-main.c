@@ -49,14 +49,15 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. High-Throughput RunLoop Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. Frame-Skip Enabled Mode.\n", playerIndex);
 
     const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
-    const uint32_t MAX_CYCLE_BUDGET = 280896 * 4; // 4 frames budget
-    const uint32_t DEFAULT_THRESHOLD = 8192; 
-    const uint32_t HIGH_PRECISION_THRESHOLD = 256; 
+    const uint32_t MAX_CYCLE_BUDGET = 280896 * 4; 
+    const uint32_t DEFAULT_THRESHOLD = 16384; 
+    const uint32_t HIGH_PRECISION_THRESHOLD = 512; 
     const size_t AUDIO_SAFE_LIMIT = 2048;
+    const int64_t FRAME_SKIP_THRESHOLD = 280896; // Skip frame if behind more than 1 frame
 
     double startTime = emscripten_get_now();
     uint64_t totalCyclesExecuted = 0;
@@ -66,7 +67,6 @@ void mgba_run_player(int playerIndex) {
 
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
-            // Catch up startTime when waking up from lockstep to avoid massive budget spikes
             double currentTime = emscripten_get_now();
             startTime = currentTime - (double)totalCyclesExecuted / MS_TO_CYCLES;
         }
@@ -80,7 +80,6 @@ void mgba_run_player(int playerIndex) {
             bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
             bool isMultiplayer = coordinatorInitialized && coordinator.nAttached > 1;
 
-            // Adaptive Audio Sync: Be more lenient if we are in multiplayer to avoid blocking others
             size_t currentAudioLimit = isMultiplayer ? 12288 : AUDIO_SAFE_LIMIT;
 
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
@@ -96,8 +95,6 @@ void mgba_run_player(int playerIndex) {
             
             int64_t budget = (int64_t)(targetTotalCycles - totalCyclesExecuted);
 
-            // Important: In multiplayer, NEVER skip cycles as it causes SIO desync.
-            // Only cap the budget if we are in single player or if it's extremely large.
             if (!isMultiplayer && budget > (int64_t)MAX_CYCLE_BUDGET) {
                 budget = MAX_CYCLE_BUDGET;
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
@@ -111,10 +108,19 @@ void mgba_run_player(int playerIndex) {
                     emscripten_thread_sleep(0); 
                 } else {
                     double sleepMs = (double)(threshold - budget) / MS_TO_CYCLES;
-                    if (sleepMs < 1.0) sleepMs = 0; // High frequency poll if close
+                    if (sleepMs < 1.0) sleepMs = 0;
                     emscripten_thread_sleep((unsigned int)sleepMs);
                 }
                 continue;
+            }
+
+            // Frame Skipping Logic: Disable rendering if we are falling behind
+            // But NEVER skip if SIO transfer is active to ensure timing stability
+            bool shouldSkip = !isTransferActive && (budget > FRAME_SKIP_THRESHOLD);
+            if (shouldSkip) {
+                p->core->setVideoBuffer(p->core, NULL, 0);
+            } else {
+                p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
             }
 
             p->core->clearKeys(p->core, 0x3FF);
@@ -123,13 +129,19 @@ void mgba_run_player(int playerIndex) {
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
 
-            // Optimization: Use runLoop instead of step to stay in WASM longer
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                // If skipping, we can use a even faster runLoop if available, 
+                // but standard runLoop is already good.
                 p->core->runLoop(p->core);
             }
 
             uint32_t actualExecuted = mTimingCurrentTime(p->core->timing) - startCycles;
             totalCyclesExecuted += actualExecuted;
+
+            // Re-enable video buffer if it was disabled
+            if (shouldSkip) {
+                p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
+            }
 
             pthread_mutex_unlock(&p->mutex);
         } else {
