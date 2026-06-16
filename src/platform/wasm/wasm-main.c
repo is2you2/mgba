@@ -79,108 +79,128 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Atomic-Sync Pro Mode Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. Ultimate Hybrid Sync Active.\n", playerIndex);
 
+    // 싱글플레이 전용 타이밍 변수
     const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
     const uint32_t MAX_CYCLE_BUDGET = 280896 * 4; 
-    const uint32_t DEFAULT_THRESHOLD = 16384; 
-    const uint32_t HIGH_PRECISION_THRESHOLD = 128;
-    const int64_t FRAME_SKIP_THRESHOLD = 280896;
-
     double startTime = emscripten_get_now();
     uint64_t totalCyclesExecuted = 0;
 
     while (atomic_load(&p->active)) {
+        
+        // =================================================================
+        // [1] 락스텝 슬립 상태 처리 (마스터/슬레이브 동기화 락 인터록)
+        // =================================================================
         if (p->lockstepDriver.asleep) {
             pthread_mutex_lock(&p->mutex);
             while (p->lockstepDriver.asleep && atomic_load(&p->active)) {
+                // 마스터 노드가 깨어났으나 시그널을 놓쳤을 때를 위한 초고속 해제 안전장치
                 if (coordinatorInitialized && p->lockstepDriver.lockstepId == coordinator.attachedPlayers[0] && coordinator.waiting == 0) {
                     p->lockstepDriver.asleep = false;
                     break;
                 }
+                // 멀티플레이 시에는 긴 대기 대신 짧은 조건 변수 대기 수행
                 pthread_cond_wait(&p->cond, &p->mutex);
             }
             pthread_mutex_unlock(&p->mutex);
             
+            // 깨어난 후 싱글플레이용 시간축만 갱신
             double currentTime = emscripten_get_now();
             startTime = currentTime - (double)totalCyclesExecuted / MS_TO_CYCLES;
         }
 
         if (!atomic_load(&p->active)) break;
 
+        // 코어 존재 여부 체크를 위한 최소한의 임계 구역
         pthread_mutex_lock(&p->mutex);
-        if (p->core) {
-            bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
-            bool isMultiplayer = coordinatorInitialized && coordinator.nAttached > 1;
+        if (!p->core) {
+            pthread_mutex_unlock(&p->mutex);
+            emscripten_thread_sleep(10);
+            continue;
+        }
 
-            struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            size_t currentAudioLimit = isMultiplayer ? 12288 : 2048;
-            if (audio && mAudioBufferAvailable(audio) > currentAudioLimit) {
-                pthread_cond_wait(&p->cond, &p->mutex);
+        // 실시간 멀티플레이 상태 감지
+        bool isMultiplayer = coordinatorInitialized && coordinator.nAttached > 1;
+        bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
+
+        // =================================================================
+        // [2] 오디오 동기화 및 오버플로우 방지 (멀티플레이 정속 구동의 핵심)
+        // =================================================================
+        struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
+        if (audio) {
+            size_t availableSamples = mAudioBufferAvailable(audio);
+            // 멀티플레이어일 때는 버퍼 임계치를 엄격하게 잡아 가속을 원천 차단 (약 2~3프레임 분량)
+            size_t audioThreshold = isMultiplayer ? 3072 : 12288; 
+            
+            if (availableSamples > audioThreshold) {
+                // 중요: 이 상태에서 강제로 잠들면 병목이 생기므로, 
+                // 락을 풀고 타 스레드에게 즉시 양보(yield)한 뒤 루프를 다시 돕니다.
                 pthread_mutex_unlock(&p->mutex);
+                emscripten_thread_sleep(0); 
                 continue;
             }
+        }
 
+        // 키 입력 처리 (락 프리 아토믹 반영)
+        p->core->clearKeys(p->core, 0x3FF);
+        p->core->addKeys(p->core, (uint16_t)atomic_load(&p->inputState));
+
+        // =================================================================
+        // [3] 모드별 에뮬레이션 구동 분기
+        // =================================================================
+        if (isMultiplayer) {
+            // ⭐ [멀티플레이 모드]: 시간 기반 Budget 계산을 완전히 배제합니다.
+            // 락스텝 협력 구조와 오디오 버퍼 한계치 제어만으로 정속을 유지합니다.
+            pthread_mutex_unlock(&p->mutex);
+
+            if (isTransferActive) {
+                // 직렬 통신 데이터 교환 중(가장 민감함): 
+                // 1 스텝씩만 정밀하게 밟고 즉시 스레드 컨텍스트를 전환하여 무한 Ack 대기를 방지
+                p->core->step(p->core);
+                emscripten_thread_sleep(0);
+            } else {
+                // 일반 멀티플레이 상태: mGBA 내부 인터록이 걸릴 때까지 1프레임 단위 유연 구동
+                p->core->runLoop(p->core);
+                // 슬레이브 기기들의 민첩한 패킷 처리를 위해 매 프레임 끝날 때마다 힌트 부여
+                if (playerIndex != 0) {
+                    emscripten_thread_sleep(0);
+                }
+            }
+        } else {
+            // 🛡️ [싱글플레이 모드]: 정밀한 60Hz 시간 버젯 기반 구동 (기존 안정성 유지)
             double currentTime = emscripten_get_now();
             double elapsed = currentTime - startTime;
             uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
             int64_t budget = (int64_t)(targetTotalCycles - totalCyclesExecuted);
 
-            if (!isMultiplayer && budget > (int64_t)MAX_CYCLE_BUDGET) {
+            if (budget > (int64_t)MAX_CYCLE_BUDGET) {
                 budget = MAX_CYCLE_BUDGET;
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
             }
 
-            uint32_t threshold = isTransferActive ? HIGH_PRECISION_THRESHOLD : DEFAULT_THRESHOLD;
-
-            if (budget < (int64_t)threshold) {
+            // 구동할 사이클이 부족하면 락을 풀고 브라우저 타이머 해상도만큼 대기
+            if (budget < (int64_t)16384) {
                 pthread_mutex_unlock(&p->mutex);
-                if (isTransferActive) {
-                    emscripten_thread_sleep(0);
-                } else {
-                    double sleepMs = (double)(threshold - budget) / MS_TO_CYCLES;
-                    if (sleepMs < 1.0) sleepMs = 0;
-                    emscripten_thread_sleep((unsigned int)sleepMs);
-                }
+                double sleepMs = (double)(16384 - budget) / MS_TO_CYCLES;
+                emscripten_thread_sleep(sleepMs < 1.0 ? 0 : (unsigned int)sleepMs);
                 continue;
             }
-
-            // Frame Skipping: If we are skipping, we set NULL. 
-            // If NOT skipping, we DON'T set the buffer here because wasm_video_frame_ended already manages it.
-            bool shouldSkip = !isTransferActive && (budget > FRAME_SKIP_THRESHOLD);
-            if (shouldSkip) {
-                p->core->setVideoBuffer(p->core, NULL, 0);
-            }
-
-            p->core->clearKeys(p->core, 0x3FF);
-            p->core->addKeys(p->core, (uint16_t)atomic_load(&p->inputState));
 
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
 
+            pthread_mutex_unlock(&p->mutex);
+
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
                 p->core->runLoop(p->core);
-
-                if (isTransferActive) {
-                    pthread_mutex_unlock(&p->mutex);
-                    emscripten_thread_sleep(0);
-                    pthread_mutex_lock(&p->mutex);
-                }
             }
 
+            pthread_mutex_lock(&p->mutex);
             uint32_t actualExecuted = mTimingCurrentTime(p->core->timing) - startCycles;
             totalCyclesExecuted += actualExecuted;
-
-            // If we were skipping, we MUST restore the buffer for the next frame to render
-            if (shouldSkip) {
-                p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
-            }
-
             pthread_mutex_unlock(&p->mutex);
-        } else {
-            pthread_mutex_unlock(&p->mutex);
-            emscripten_thread_sleep(10);
         }
     }
     printf("WASM: Player %d thread exiting.\n", playerIndex);
