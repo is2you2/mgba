@@ -49,12 +49,13 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Optimized Cycle Budgeting Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. Adaptive High-Performance Mode Active.\n", playerIndex);
 
     const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
     const uint32_t MAX_CYCLE_BUDGET = 280896 * 2;
-    const uint32_t MIN_BUDGET_THRESHOLD = 16384; // Increased threshold (~1ms) to reduce loop overhead
+    const uint32_t DEFAULT_THRESHOLD = 16384; 
+    const uint32_t HIGH_PRECISION_THRESHOLD = 512; // Much finer granularity for SIO
     const size_t AUDIO_SAFE_LIMIT = 2048;
 
     double startTime = emscripten_get_now();
@@ -79,9 +80,12 @@ void mgba_run_player(int playerIndex) {
         }
 
         if (p->core) {
-            // Audio Sync: Use condition variable to wait if buffer is full instead of polling
+            // Adaptive Sync: If SIO transfer is active, we prioritize communication over audio buffering
+            bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
+            size_t currentAudioLimit = isTransferActive ? 6144 : AUDIO_SAFE_LIMIT;
+
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
-            if (audio && mAudioBufferAvailable(audio) > AUDIO_SAFE_LIMIT) {
+            if (audio && mAudioBufferAvailable(audio) > currentAudioLimit) {
                 pthread_cond_wait(&p->cond, &p->mutex);
                 pthread_mutex_unlock(&p->mutex);
                 continue;
@@ -98,12 +102,18 @@ void mgba_run_player(int playerIndex) {
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
             }
 
-            // CPU Optimization: If we are ahead of schedule, sleep for a meaningful amount of time
-            if (budget < (int64_t)MIN_BUDGET_THRESHOLD) {
+            // Adaptive Granularity: Use smaller chunks during active SIO transfer
+            uint32_t threshold = isTransferActive ? HIGH_PRECISION_THRESHOLD : DEFAULT_THRESHOLD;
+
+            if (budget < (int64_t)threshold) {
                 pthread_mutex_unlock(&p->mutex);
-                double sleepMs = (double)(MIN_BUDGET_THRESHOLD - budget) / MS_TO_CYCLES;
-                if (sleepMs < 1.0) sleepMs = 1.0; 
-                emscripten_thread_sleep((unsigned int)sleepMs);
+                if (isTransferActive) {
+                    emscripten_thread_sleep(0); // Yield quickly during transfer
+                } else {
+                    double sleepMs = (double)(threshold - budget) / MS_TO_CYCLES;
+                    if (sleepMs < 1.0) sleepMs = 1.0; 
+                    emscripten_thread_sleep((unsigned int)sleepMs);
+                }
                 continue;
             }
 
@@ -113,7 +123,6 @@ void mgba_run_player(int playerIndex) {
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
 
-            // Execute cycles in larger chunks if not in lockstep or if needed
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
                 p->core->step(p->core);
             }
@@ -122,7 +131,6 @@ void mgba_run_player(int playerIndex) {
             totalCyclesExecuted += actualExecuted;
 
             pthread_mutex_unlock(&p->mutex);
-            // Removed emscripten_thread_sleep(0) to avoid unnecessary yielding when working
         } else {
             pthread_mutex_unlock(&p->mutex);
             emscripten_thread_sleep(10);
@@ -350,6 +358,10 @@ void mgba_set_button(int playerIndex, int button, int pressed) {
         p->inputState |= (1 << button);
     else
         p->inputState &= ~(1 << button);
+    
+    // Interrupt-driven Input: Wake the player thread immediately when input changes
+    pthread_cond_signal(&p->cond);
+    
     pthread_mutex_unlock(&p->mutex);
 }
 
