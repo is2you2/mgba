@@ -128,6 +128,34 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         const AUDIO_CHANNELS = 2;
         const AUDIO_BUFFER_SIZE = 4096;
         let audioPtr = 0;
+        init();
+
+        function SaveGameSav(playerIndex) {
+            const p = players[playerIndex];
+            if (!p || !p.active) return;
+
+            const sizePtr = Module._malloc(4);
+            const dataPtr = emulator.getSaveData(playerIndex, sizePtr);
+            const size = Module.getValue(sizePtr, 'i32');
+            Module._free(sizePtr);
+
+            if (dataPtr && size > 0) {
+                // SharedArrayBuffer로부터 직접 Blob을 생성할 수 없으므로 (보안 정책),
+                // 데이터를 일반 Uint8Array로 복사한 뒤 Blob을 생성합니다.
+                const sharedData = new Uint8Array(Module.HEAPU8.buffer, dataPtr, size);
+                const saveData = new Uint8Array(sharedData);
+
+                const blob = new Blob([saveData], { type: 'application/octet-stream' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${p.romName}.sav`;
+                a.click();
+                URL.revokeObjectURL(url);
+                emulator.freeBuffer(dataPtr);
+                console.log(`Save data downloaded for Player ${playerIndex + 1}`);
+            }
+        };
 
         function setFocus(index) {
             focusedPlayerIndex = index;
@@ -144,16 +172,22 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             box.onclick = () => setFocus(index);
 
             box.innerHTML = `
-                <div class="player-label">Player ${index + 1}</div>
-                <div class="input-group">
-                    <input type="file" class="rom-upload" data-index="${index}" accept=".gba,.gb,.gbc">
-                </div>
-                <canvas id="screen-${index}"></canvas>
-            `;
+        <div class="player-label">Player ${index + 1}</div>
+        <div class="input-group">
+            <label>ROM: </label><input type="file" class="rom-upload" data-index="${index}" accept=".gba,.gb,.gbc">
+        </div>
+        <div class="input-group">
+            <label>Save: </label><input type="file" class="save-upload" data-index="${index}" accept=".sav">
+        </div>
+        <canvas id="screen-${index}"></canvas>
+    `;
             grid.appendChild(box);
 
-            const input = box.querySelector('.rom-upload');
-            input.addEventListener('change', (e) => handleRomUpload(e));
+            const romInput = box.querySelector('.rom-upload');
+            romInput.addEventListener('change', (e) => handleRomUpload(e));
+
+            const saveInput = box.querySelector('.save-upload');
+            saveInput.addEventListener('change', (e) => handleSaveUpload(e));
         }
 
         async function init() {
@@ -174,6 +208,9 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                 getWidth: Module.cwrap('mgba_get_width', 'number', ['number']),
                 getHeight: Module.cwrap('mgba_get_height', 'number', ['number']),
                 setButton: Module.cwrap('mgba_set_button', 'void', ['number', 'number', 'number']),
+                getSaveData: Module.cwrap('mgba_get_save_data', 'number', ['number', 'number']),
+                loadSaveData: Module.cwrap('mgba_load_save_data', 'number', ['number', 'number', 'number']),
+                freeBuffer: Module.cwrap('mgba_free_buffer', 'void', ['number']),
             };
 
             emulator.init();
@@ -188,7 +225,8 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     ctx: canvas.getContext('2d'),
                     imageData: null,
                     active: false,
-                    audioNextTime: 0
+                    audioNextTime: 0,
+                    romName: 'game'
                 };
             }
         }
@@ -197,7 +235,13 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
         async function handleRomUpload(e) {
             const file = e.target.files[0];
+            const index = parseInt(e.target.dataset.index);
+            if (index == 0) {
+                window.onSavedataUpdated(0);
+            }
             if (!file || !emulator) return;
+
+            const romName = file.name.replace(/\.[^/.]+$/, "");
 
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -206,7 +250,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             const buffer = await file.arrayBuffer();
             const uint8Array = new Uint8Array(buffer);
 
-            for (let i = 0, j = MAX_PLAYERS; i < j; i++) {
+            for (let i = 0; i < MAX_PLAYERS; i++) {
                 const ptr = Module._malloc(uint8Array.length);
                 Module.HEAPU8.set(uint8Array, ptr);
                 const success = emulator.loadRom(i, ptr, uint8Array.length);
@@ -214,6 +258,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
                 if (success) {
                     const p = players[i];
+                    p.romName = romName;
                     p.canvas.width = emulator.getWidth(i);
                     p.canvas.height = emulator.getHeight(i);
                     p.imageData = p.ctx.createImageData(p.canvas.width, p.canvas.height);
@@ -225,6 +270,34 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             if (!window.loopStarted) {
                 window.loopStarted = true;
                 startLoop();
+            }
+        }
+
+        async function handleSaveUpload(e) {
+            const file = e.target.files[0];
+            if (!file || !emulator) return;
+
+            const index = parseInt(e.target.dataset.index);
+            const p = players[index];
+            if (!p || !p.active) {
+                alert("Please load a ROM first.");
+                return;
+            }
+
+            const buffer = await file.arrayBuffer();
+            const uint8Array = new Uint8Array(buffer);
+            const ptr = Module._malloc(uint8Array.length);
+            Module.HEAPU8.set(uint8Array, ptr);
+
+            const success = emulator.loadSaveData(index, ptr, uint8Array.length);
+            Module._free(ptr);
+
+            if (success) {
+                console.log(`Save data loaded for Player ${index + 1}`);
+                alert(`Save data loaded for Player ${index + 1}`);
+            } else {
+                console.error(`Failed to load save data for Player ${index + 1}`);
+                alert(`Failed to load save data for Player ${index + 1}`);
             }
         }
 

@@ -396,6 +396,33 @@ int mgba_load_state(int playerIndex, uint8_t* buffer, size_t size) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+uint8_t* mgba_get_save_data(int playerIndex, size_t* outSize) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
+    struct Player* p = &players[playerIndex];
+    if (!p->core) return NULL;
+
+    void* sram = NULL;
+    size_t size = p->core->savedataClone(p->core, &sram);
+    *outSize = size;
+    return (uint8_t*)sram;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int mgba_load_save_data(int playerIndex, uint8_t* buffer, size_t size) {
+    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
+    struct Player* p = &players[playerIndex];
+    if (!p->core) return 0;
+
+    pthread_mutex_lock(&p->mutex);
+    bool success = p->core->savedataRestore(p->core, buffer, size, true);
+    if (success) {
+        p->core->reset(p->core);
+    }
+    pthread_mutex_unlock(&p->mutex);
+    return success ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
 void mgba_free_buffer(void* ptr) {
     if (ptr) free(ptr);
 }
