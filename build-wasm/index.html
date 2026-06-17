@@ -225,7 +225,9 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     imageData: null,
                     active: false,
                     audioNextTime: 0,
-                    romName: 'game'
+                    romName: 'game',
+                    audioBuffer: new Float32Array(AUDIO_BUFFER_SIZE * 8),
+                    audioBufferCount: 0
                 };
             }
         }
@@ -327,25 +329,49 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                         if (p && p.active) {
                             const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
                             let numSamples;
+
+                            // 1. 에뮬레이터에서 샘플을 모두 수집하여 내부 버퍼에 저장
                             while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
                                 const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
-                                const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, numSamples / AUDIO_CHANNELS, emulatorSampleRate);
+                                if (p.audioBufferCount + numSamples <= p.audioBuffer.length) {
+                                    for (let j = 0; j < numSamples; j++) {
+                                        p.audioBuffer[p.audioBufferCount++] = audioData[j] / 32768.0;
+                                    }
+                                }
+                            }
+
+                            // 2. 일정한 크기(예: 1024 프레임)가 모이면 오디오 컨텍스트에 예약
+                            // 너무 작은 단위로 예약하면 성능 저하와 소리 끊김이 발생하므로 임계값을 둡니다.
+                            const PLAY_THRESHOLD = 1024 * AUDIO_CHANNELS;
+                            while (p.audioBufferCount >= PLAY_THRESHOLD) {
+                                const framesToPlay = PLAY_THRESHOLD / AUDIO_CHANNELS;
+                                const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, framesToPlay, emulatorSampleRate);
                                 const leftChannel = audioBuffer.getChannelData(0);
                                 const rightChannel = audioBuffer.getChannelData(1);
-                                for (let j = 0; j < numSamples / AUDIO_CHANNELS; j++) {
-                                    leftChannel[j] = audioData[j * 2] / 32768.0;
-                                    rightChannel[j] = audioData[j * 2 + 1] / 32768.0;
+
+                                for (let j = 0; j < framesToPlay; j++) {
+                                    leftChannel[j] = p.audioBuffer[j * 2];
+                                    rightChannel[j] = p.audioBuffer[j * 2 + 1];
                                 }
+
+                                // 사용한 샘플만큼 버퍼를 앞으로 당김
+                                p.audioBuffer.copyWithin(0, PLAY_THRESHOLD, p.audioBufferCount);
+                                p.audioBufferCount -= PLAY_THRESHOLD;
+
                                 const source = audioContext.createBufferSource();
                                 source.buffer = audioBuffer;
                                 source.connect(audioContext.destination);
 
-                                const drift = p.audioNextTime - audioContext.currentTime;
-                                if (drift > 0.2 || drift < -0.2) {
-                                    p.audioNextTime = audioContext.currentTime;
+                                // 지연(drift) 관리: 오디오 예약 시간이 현재 시간과 너무 차이나면 보정
+                                const currentTime = audioContext.currentTime;
+                                const drift = p.audioNextTime - currentTime;
+
+                                // 너무 뒤쳐지거나(0.05s) 너무 앞서가면(0.15s) 현재 시간 기준으로 재설정
+                                if (drift < -0.05 || drift > 0.15) {
+                                    p.audioNextTime = currentTime + 0.02; // 20ms 정도의 여유를 둠
                                 }
 
-                                const playTime = Math.max(p.audioNextTime, audioContext.currentTime);
+                                const playTime = Math.max(p.audioNextTime, currentTime);
                                 source.start(playTime);
                                 p.audioNextTime = playTime + audioBuffer.duration;
 
