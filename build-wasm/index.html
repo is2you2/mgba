@@ -349,7 +349,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
                             // 2. 512 프레임(스테레오 기준 1024 샘플, 약 31ms) 단위로 쪼개서 예약
                             // 1024 프레임은 대기 시간이 길어질 수 있으므로 512나 256 프레임이 에뮬레이터에 적절합니다.
-                            const CHUNK_FRAMES = 512;
+                            const CHUNK_FRAMES = 1024;
                             const SAMPLE_BATCH = CHUNK_FRAMES * AUDIO_CHANNELS;
 
                             while (p.audioBufferCount >= SAMPLE_BATCH) {
