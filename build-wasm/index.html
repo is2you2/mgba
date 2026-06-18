@@ -120,7 +120,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         let Module = null;
         let emulator = null;
         const players = [];
-        const MAX_PLAYERS = 4; // C단의 MAX_PLAYERS와 일치해야 함
+        const MAX_PLAYERS = 1; // C단의 MAX_PLAYERS와 일치해야 함
         let focusedPlayerIndex = 0;
 
         // Audio state
@@ -322,81 +322,101 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
             requestAnimationFrame(render);
 
             function runEmulation() {
-                // 상단 suspended 체크 이동
                 if (audioContext && audioContext.state === 'suspended') {
                     document.getElementById('resume-audio').style.display = 'inline';
                 }
+                if (audioContext && audioContext.state !== 'running') {
+                    setTimeout(runEmulation, 15);
+                    return;
+                }
+                for (let i = 0; i < MAX_PLAYERS; i++) {
+                    const p = players[i];
+                    if (!p || !p.active) continue;
+                    const sampleRate = emulator.getAudioSampleRate(i) || 32768;
+                    // =========================================================
+                    // 1. Emulator → JS buffer push (기존 유지)
+                    // =========================================================
+                    let numSamples;
+                    while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
+                        const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
 
-                if (audioContext && audioContext.state === 'running') {
-                    for (let i = 0; i < MAX_PLAYERS; i++) {
-                        const p = players[i];
-                        if (p && p.active) {
-                            const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
-                            let numSamples;
-
-                            // 1. 에뮬레이터에서 현재 쌓인 모든 샘플을 긁어 모음
-                            while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
-                                const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
-                                if (p.audioBufferCount + numSamples <= p.audioBuffer.length) {
-                                    for (let j = 0; j < numSamples; j++) {
-                                        p.audioBuffer[p.audioBufferCount++] = audioData[j] / 32768.0;
-                                    }
-                                } else {
-                                    // 버퍼 오버플로우 방지 (너무 많이 쌓이면 앞을 비움)
-                                    p.audioBufferCount = 0;
-                                }
+                        if (p.audioBufferCount + numSamples <= p.audioBuffer.length) {
+                            for (let j = 0; j < numSamples; j++) {
+                                p.audioBuffer[p.audioBufferCount++] = audioData[j] / 32768.0;
                             }
-
-                            // 2. 512 프레임(스테레오 기준 1024 샘플, 약 31ms) 단위로 쪼개서 예약
-                            // 1024 프레임은 대기 시간이 길어질 수 있으므로 512나 256 프레임이 에뮬레이터에 적절합니다.
-                            const CHUNK_FRAMES = 1024;
-                            const SAMPLE_BATCH = CHUNK_FRAMES * AUDIO_CHANNELS;
-
-                            while (p.audioBufferCount >= SAMPLE_BATCH) {
-                                const audioBuffer = audioContext.createBuffer(AUDIO_CHANNELS, CHUNK_FRAMES, emulatorSampleRate);
-                                const leftChannel = audioBuffer.getChannelData(0);
-                                const rightChannel = audioBuffer.getChannelData(1);
-
-                                for (let j = 0; j < CHUNK_FRAMES; j++) {
-                                    leftChannel[j] = p.audioBuffer[j * 2];
-                                    rightChannel[j] = p.audioBuffer[j * 2 + 1];
-                                }
-
-                                // 사용한 데이터만큼 버퍼 앞으로 당기기
-                                p.audioBuffer.copyWithin(0, SAMPLE_BATCH, p.audioBufferCount);
-                                p.audioBufferCount -= SAMPLE_BATCH;
-
-                                const source = audioContext.createBufferSource();
-                                source.buffer = audioBuffer;
-                                source.connect(audioContext.destination);
-
-                                const currentTime = audioContext.currentTime;
-
-                                // [중요] 드리프트 보정 로직 정밀화
-                                // 오디오 타임라인이 현재 시간보다 뒤쳐졌거나(언더플로우), 
-                                // 혹은 너무 멀리 앞서갔다면(오버플로우) 강제로 타임라인을 동기화합니다.
-                                if (p.audioNextTime < currentTime || p.audioNextTime > currentTime + 0.2) {
-                                    // 현재 시간보다 30ms 미래에 재생하도록 타임라인 재설정 (안정적인 버퍼 확보)
-                                    p.audioNextTime = currentTime + 0.03;
-                                }
-
-                                // 가끔 계산 오차로 주기가 겹치지 않도록 현재 타임라인 시간으로 시작
-                                source.start(p.audioNextTime);
-
-                                // 다음 예약 시간 갱신
-                                p.audioNextTime += audioBuffer.duration;
-
-                                // 메모리 누수 방지
-                                source.onended = () => {
-                                    source.disconnect();
-                                };
-                            }
+                        } else {
+                            // overflow 방지 (drop)
+                            p.audioBufferCount = 0;
+                            p.audioPlayedSamples = 0;
                         }
                     }
-                }
+                    // =========================================================
+                    // 2. 초기화 (1프레임 latency 기준 시작점 고정)
+                    // =========================================================
+                    const now = audioContext.currentTime;
+                    const FRAME_LATENCY = 1 / 60;
+                    if (p.audioStartTime === undefined) {
+                        p.audioStartTime = now + FRAME_LATENCY;
+                        p.audioPlayedSamples = 0;
+                    }
+                    // =========================================================
+                    // 3. ideal audio position 계산 (clock 기반)
+                    // =========================================================
+                    const idealSamples =
+                        (now - p.audioStartTime) * sampleRate;
+                    // =========================================================
+                    // 4. drift 계산
+                    // =========================================================
+                    let drift = idealSamples - p.audioPlayedSamples;
+                    // 너무 작은 drift는 무시 (jitter 제거)
+                    if (Math.abs(drift) < 32) drift = 0;
+                    // =========================================================
+                    // 5. 소비 가능한 샘플 수 계산
+                    // =========================================================
+                    let consumeSamples = Math.floor(drift);
+                    if (consumeSamples > p.audioBufferCount) {
+                        consumeSamples = p.audioBufferCount;
+                    }
+                    if (consumeSamples <= 0) {
+                        continue;
+                    }
+                    // =========================================================
+                    // 6. Float 변환 (stereo 기준)
+                    // =========================================================
+                    const frames = Math.floor(consumeSamples / AUDIO_CHANNELS);
 
-                // 16ms 대신 10~12ms 정도로 돌리면 에뮬레이터가 브라우저 타이머 지연보다 
-                // 항상 한 발 앞서 오디오 버퍼를 채워주기 때문에 지직거림이 비약적으로 줄어듭니다.
+                    const audioBuffer = audioContext.createBuffer(
+                        AUDIO_CHANNELS,
+                        frames,
+                        sampleRate
+                    );
+                    const left = audioBuffer.getChannelData(0);
+                    const right = audioBuffer.getChannelData(1);
+                    for (let j = 0; j < frames; j++) {
+                        left[j] = p.audioBuffer[j * 2];
+                        right[j] = p.audioBuffer[j * 2 + 1];
+                    }
+                    // =========================================================
+                    // 7. buffer shift (consume)
+                    // =========================================================
+                    const used = frames * AUDIO_CHANNELS;
+                    p.audioBuffer.copyWithin(0, used, p.audioBufferCount);
+                    p.audioBufferCount -= used;
+                    // =========================================================
+                    // 8. playback (즉시 기준, scheduling 제거)
+                    // =========================================================
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    source.start(now);
+                    // =========================================================
+                    // 9. consumed sample tracking
+                    // =========================================================
+                    p.audioPlayedSamples += used;
+                    source.onended = () => {
+                        source.disconnect();
+                    };
+                }
                 setTimeout(runEmulation, 15);
             }
             runEmulation();
