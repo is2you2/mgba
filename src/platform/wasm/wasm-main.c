@@ -126,15 +126,19 @@ void mgba_run_player(int playerIndex) {
         struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
         if (audio) {
             size_t availablePairs = mAudioBufferAvailable(audio);
-            // 멀티플레이 시 약 1~1.5프레임 분량인 1024 샘플 쌍으로 극단적인 제어 수행
-            size_t audioThreshold = isMultiplayer ? 1024 : 12288; 
+            
+            // ⭐ [수정] 하드코딩 대신 현재 주파수 기준 1프레임(1/60초)에 해당하는 샘플 수 계산
+            unsigned int currentSampleRate = p->core->audioSampleRate(p->core);
+            if (currentSampleRate == 0) currentSampleRate = 32768; // 폴백 방어 코드
+            
+            // 1프레임 분량의 샘플 쌍 (예: 65536/60 ≒ 1092, 32768/60 ≒ 546)
+            size_t oneFrameSamples = currentSampleRate / 60; 
+            size_t audioThreshold = isMultiplayer ? oneFrameSamples : (oneFrameSamples * 12); 
             
             if (availablePairs > audioThreshold) {
-                // 브라우저가 사운드를 채가서 버퍼가 비워질 때까지 현재 스레드를 완벽히 정지
                 while (mAudioBufferAvailable(audio) > audioThreshold && atomic_load(&p->active)) {
                     pthread_cond_wait(&p->cond, &p->mutex);
                 }
-                // 깨어난 후 안전하게 상태를 재확인하기 위해 루프 처음으로 리턴
                 pthread_mutex_unlock(&p->mutex);
                 continue;
             }

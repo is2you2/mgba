@@ -333,11 +333,9 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     const p = players[i];
                     if (!p || !p.active) continue;
                     const sampleRate = emulator.getAudioSampleRate(i) || 32768;
-                    // =========================================================
-                    // 1. Emulator → JS buffer push (기존 유지)
-                    // =========================================================
+                    const dynamicFetchSize = sampleRate < 40000 ? AUDIO_BUFFER_SIZE / 2 : AUDIO_BUFFER_SIZE;
                     let numSamples;
-                    while ((numSamples = emulator.getAudioSamples(i, audioPtr, AUDIO_BUFFER_SIZE)) > 0) {
+                    while ((numSamples = emulator.getAudioSamples(i, audioPtr, dynamicFetchSize)) > 0) {
                         const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
 
                         if (p.audioBufferCount + numSamples <= p.audioBuffer.length) {
