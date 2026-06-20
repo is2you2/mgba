@@ -66,6 +66,10 @@ wss.on("connection", (ws, req) => {
             case "msg":
                 handlePrivateMessage(clientUuid, msg);
                 break;
+            // 자유 타입 정보에 대해 브로드케스트
+            default:
+                handleBroadcast(clientUuid, msg);
+                break;
         }
     });
 
@@ -77,13 +81,10 @@ wss.on("connection", (ws, req) => {
 function handleJoin(clientUuid, msg) {
     const roomId = msg.uuid;
 
-    if (!roomId) {
-        return;
-    }
+    if (!roomId) return;
 
     let room = rooms.get(roomId);
 
-    // 방 없으면 생성 + 자신이 host
     if (!room) {
         room = {
             host: clientUuid,
@@ -99,6 +100,7 @@ function handleJoin(clientUuid, msg) {
     const client = clients.get(clientUuid);
     client.roomId = roomId;
 
+    // 본인에게만 joined 응답
     send(client.ws, {
         type: "joined",
         roomId,
@@ -162,10 +164,7 @@ function handlePrivateMessage(senderUuid, msg) {
 
 function handleDisconnect(clientUuid) {
     const client = clients.get(clientUuid);
-
-    if (!client) {
-        return;
-    }
+    if (!client) return;
 
     const { roomId } = client;
 
@@ -173,21 +172,24 @@ function handleDisconnect(clientUuid) {
         const room = rooms.get(roomId);
 
         if (room) {
+            room.clients.delete(clientUuid);
+
+            // 방장인 경우 전체 종료
             if (room.host === clientUuid) {
-                // 방장이 나가면 모든 클라이언트 퇴출
-                for (const memberId of room.clients) {
-                    const member = clients.get(memberId);
-                    if (member) {
-                        send(member.ws, {
-                            type: "roomClosed",
-                            message: "방장이 나가서 방이 종료되었습니다.",
-                        });
-                    }
-                }
+                broadcast(room, {
+                    type: "roomClosed",
+                    message: "방장이 나가서 방이 종료되었습니다.",
+                });
+
                 rooms.delete(roomId);
             } else {
-                // 방장이 아닌 경우 단순히 클라이언트 제거
-                room.clients.delete(clientUuid);
+                const hostClient = clients.get(room.host);
+                if (hostClient) {
+                    send(hostClient.ws, {
+                        type: "clientDisconnected",
+                        uuid: clientUuid,
+                    });
+                }
 
                 if (room.clients.size === 0) {
                     rooms.delete(roomId);
@@ -197,6 +199,28 @@ function handleDisconnect(clientUuid) {
     }
 
     clients.delete(clientUuid);
+}
+
+function broadcast(room, data, excludeUuid = null) {
+    for (const clientId of room.clients) {
+        if (excludeUuid && clientId === excludeUuid) continue;
+
+        const client = clients.get(clientId);
+        if (client) {
+            send(client.ws, data);
+        }
+    }
+}
+
+function handleBroadcast(senderUuid, msg) {
+    const sender = clients.get(senderUuid);
+    if (!sender || !sender.roomId) return;
+
+    const room = rooms.get(sender.roomId);
+    if (!room) return;
+
+    // 방 전체에게 전송 (sender 포함 여부는 선택)
+    broadcast(room, msg);
 }
 
 console.log(`WebSocket Server : ${port}`);
