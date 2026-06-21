@@ -38,6 +38,7 @@ struct Player {
     pthread_mutex_t mutex;
     pthread_t thread;
     atomic_bool active;
+    struct mCoreCallbacks callbacks;
 };
 
 static struct Player players[MAX_PLAYERS];
@@ -133,7 +134,7 @@ void mgba_run_player(int playerIndex) {
             
             // 1프레임 분량의 샘플 쌍 (예: 65536/60 ≒ 1092, 32768/60 ≒ 546)
             size_t oneFrameSamples = currentSampleRate / 60; 
-            size_t audioThreshold = isMultiplayer ? oneFrameSamples : (oneFrameSamples * 12); 
+            size_t audioThreshold = oneFrameSamples * 4; 
             
             if (availablePairs > audioThreshold) {
                 while (mAudioBufferAvailable(audio) > audioThreshold && atomic_load(&p->active)) {
@@ -188,7 +189,9 @@ void mgba_run_player(int playerIndex) {
             pthread_mutex_unlock(&p->mutex);
 
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
+                pthread_mutex_lock(&p->mutex);
                 p->core->runLoop(p->core);
+                pthread_mutex_unlock(&p->mutex);
             }
 
             pthread_mutex_lock(&p->mutex);
@@ -290,11 +293,10 @@ int mgba_load_rom(int playerIndex, uint8_t* buffer, size_t size) {
     p->currentBuffer = 0;
     p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
 
-    struct mCoreCallbacks callbacks = {
-        .context = p,
-        .videoFrameEnded = wasm_video_frame_ended
-    };
-    p->core->addCoreCallbacks(p->core, &callbacks);
+    p->callbacks.context = p;
+    p->callbacks.videoFrameEnded = wasm_video_frame_ended;
+
+    p->core->addCoreCallbacks(p->core, &p->callbacks);
 
     if (p->core->reloadConfigOption) {
         p->core->reloadConfigOption(p->core, "hwaccelVideo", NULL);
