@@ -33,7 +33,7 @@ struct Player {
     struct GBASIOLockstepDriver lockstepDriver;
     struct mLockstepUser lockstepUser;
     atomic_uint_fast16_t inputState;
-    bool newFrameAvailable;
+    atomic_bool newFrameAvailable;
     pthread_cond_t cond;
     pthread_mutex_t mutex;
     pthread_t thread;
@@ -70,7 +70,7 @@ static void wasm_video_frame_ended(void* context) {
         p->currentBuffer = 1 - p->currentBuffer;
         // The core will now draw to the other buffer
         p->core->setVideoBuffer(p->core, (mColor*)p->videoBuffers[p->currentBuffer], p->videoWidth);
-        p->newFrameAvailable = true;
+        atomic_store(&p->newFrameAvailable, true);
     }
 }
 
@@ -134,7 +134,7 @@ void mgba_run_player(int playerIndex) {
             
             // 1프레임 분량의 샘플 쌍 (예: 65536/60 ≒ 1092, 32768/60 ≒ 546)
             size_t oneFrameSamples = currentSampleRate / 60; 
-            size_t audioThreshold = oneFrameSamples * 4; 
+            size_t audioThreshold = isMultiplayer ? oneFrameSamples : oneFrameSamples * 2; 
             
             if (availablePairs > audioThreshold) {
                 while (mAudioBufferAvailable(audio) > audioThreshold && atomic_load(&p->active)) {
@@ -185,7 +185,6 @@ void mgba_run_player(int playerIndex) {
 
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
-            pthread_unlock:
             pthread_mutex_unlock(&p->mutex);
 
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {

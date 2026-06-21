@@ -303,11 +303,6 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         }
 
         function startLoop() {
-            // 게임 저장 정보를 주기적으로 긁어오기
-            setInterval(() => {
-                for (let i = 0; i < MAX_PLAYERS; i++) SaveGame(i);
-            }, 10000);
-
             function render() {
                 for (let i = 0; i < MAX_PLAYERS; i++) {
                     const p = players[i];
@@ -403,8 +398,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                                 p.audioBufferCount -= SAMPLE_BATCH;
                                 const source = audioContext.createBufferSource();
                                 source.buffer = audioBuffer;
-                                if (i == 0)
-                                    source.connect(audioContext.destination);
+                                source.connect(audioContext.destination);
 
                                 const currentTime = audioContext.currentTime;
                                 if (
