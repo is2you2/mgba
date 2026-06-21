@@ -413,36 +413,6 @@ void mgba_set_volume(int playerIndex, int volume) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-uint8_t* mgba_save_state(int playerIndex, size_t* outSize) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
-    struct Player* p = &players[playerIndex];
-    if (!p->core) return NULL;
-    size_t bufferSize = 1024 * 1024;
-    uint8_t* buffer = (uint8_t*)malloc(bufferSize);
-    if (!buffer) return NULL;
-    struct VFile* vf = VFileFromMemory(buffer, bufferSize);
-    if (!mCoreSaveStateNamed(p->core, vf, SAVESTATE_SCREENSHOT)) {
-        vf->close(vf);
-        free(buffer);
-        return NULL;
-    }
-    *outSize = vf->size(vf);
-    vf->close(vf);
-    return buffer; 
-}
-
-EMSCRIPTEN_KEEPALIVE
-int mgba_load_state(int playerIndex, uint8_t* buffer, size_t size) {
-    if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return 0;
-    struct Player* p = &players[playerIndex];
-    if (!p->core) return 0;
-    struct VFile* vf = VFileFromConstMemory(buffer, size);
-    bool success = mCoreLoadStateNamed(p->core, vf, SAVESTATE_SCREENSHOT);
-    vf->close(vf);
-    return success ? 1 : 0;
-}
-
-EMSCRIPTEN_KEEPALIVE
 uint8_t* mgba_get_save_data(int playerIndex, size_t* outSize) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return NULL;
     struct Player* p = &players[playerIndex];
