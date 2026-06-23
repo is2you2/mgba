@@ -133,8 +133,7 @@ void mgba_run_player(int playerIndex) {
             if (currentSampleRate == 0) currentSampleRate = 32768; // 폴백 방어 코드
             
             // 1프레임 분량의 샘플 쌍 (예: 65536/60 ≒ 1092, 32768/60 ≒ 546)
-            size_t oneFrameSamples = currentSampleRate / 60; 
-            size_t audioThreshold = isMultiplayer ? oneFrameSamples : oneFrameSamples * 2; 
+            size_t audioThreshold = currentSampleRate / 60; 
             
             if (availablePairs > audioThreshold) {
                 while (mAudioBufferAvailable(audio) > audioThreshold && atomic_load(&p->active)) {
@@ -152,52 +151,7 @@ void mgba_run_player(int playerIndex) {
         // 구동 구역 진입 전 락 해제 (멀티플레이 락스텝 통신을 위해 타 스레드에 양보)
         pthread_mutex_unlock(&p->mutex);
 
-        // [3] 모드별 에뮬레이션 구동
-        if (isMultiplayer) {
-            if (isTransferActive) {
-                p->core->step(p->core);
-                emscripten_thread_sleep(0);
-            } else {
-                p->core->runLoop(p->core);
-                if (playerIndex != 0) {
-                    emscripten_thread_sleep(0);
-                }
-            }
-        } else {
-            // 싱글플레이 모드: 정밀한 시간축 버젯 제어
-            pthread_mutex_lock(&p->mutex);
-            double currentTime = emscripten_get_now();
-            double elapsed = currentTime - startTime;
-            uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
-            int64_t budget = (int64_t)(targetTotalCycles - totalCyclesExecuted);
-
-            if (budget > (int64_t)MAX_CYCLE_BUDGET) {
-                budget = MAX_CYCLE_BUDGET;
-                startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
-            }
-
-            if (budget < (int64_t)16384) {
-                pthread_mutex_unlock(&p->mutex);
-                double sleepMs = (double)(16384 - budget) / MS_TO_CYCLES;
-                emscripten_thread_sleep(sleepMs < 1.0 ? 0 : (unsigned int)sleepMs);
-                continue;
-            }
-
-            uint32_t startCycles = mTimingCurrentTime(p->core->timing);
-            uint32_t endCycles = startCycles + (uint32_t)budget;
-            pthread_mutex_unlock(&p->mutex);
-
-            while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                pthread_mutex_lock(&p->mutex);
-                p->core->runLoop(p->core);
-                pthread_mutex_unlock(&p->mutex);
-            }
-
-            pthread_mutex_lock(&p->mutex);
-            uint32_t actualExecuted = mTimingCurrentTime(p->core->timing) - startCycles;
-            totalCyclesExecuted += actualExecuted;
-            pthread_mutex_unlock(&p->mutex);
-        }
+        p->core->runLoop(p->core);
     }
     printf("WASM: Player %d thread exiting.\n", playerIndex);
 }
