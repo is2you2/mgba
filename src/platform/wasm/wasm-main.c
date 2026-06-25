@@ -88,7 +88,6 @@ void mgba_run_player(int playerIndex) {
     // 싱글플레이 전용 타이밍 변수
     const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
-    const uint32_t MAX_CYCLE_BUDGET = 280896 * 4; 
     double startTime = emscripten_get_now();
     uint64_t totalCyclesExecuted = 0;
 
@@ -119,9 +118,6 @@ void mgba_run_player(int playerIndex) {
             emscripten_thread_sleep(10);
             continue;
         }
-
-        bool isMultiplayer = coordinatorInitialized && coordinator.nAttached > 1;
-        bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
 
         // ⭐ [핵심 개선] 오디오 동기화 및 가속 억제 구조화
         struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
