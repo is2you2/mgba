@@ -49,13 +49,13 @@ EMSCRIPTEN_KEEPALIVE
 void mgba_run_player(int playerIndex) {
     if (playerIndex < 0 || playerIndex >= MAX_PLAYERS) return;
     struct Player* p = &players[playerIndex];
-    printf("WASM: Player %d thread started. Adaptive High-Performance Mode Active.\n", playerIndex);
+    printf("WASM: Player %d thread started. High-Throughput RunLoop Active.\n", playerIndex);
 
     const double CYCLES_PER_SECOND = 16777216.0;
     const double MS_TO_CYCLES = CYCLES_PER_SECOND / 1000.0;
-    const uint32_t MAX_CYCLE_BUDGET = 280896 * 2;
-    const uint32_t DEFAULT_THRESHOLD = 16384; 
-    const uint32_t HIGH_PRECISION_THRESHOLD = 512; // Much finer granularity for SIO
+    const uint32_t MAX_CYCLE_BUDGET = 280896 * 4; // 4 frames budget
+    const uint32_t DEFAULT_THRESHOLD = 8192; 
+    const uint32_t HIGH_PRECISION_THRESHOLD = 256; 
     const size_t AUDIO_SAFE_LIMIT = 2048;
 
     double startTime = emscripten_get_now();
@@ -66,12 +66,9 @@ void mgba_run_player(int playerIndex) {
 
         while (p->lockstepDriver.asleep && p->active) {
             pthread_cond_wait(&p->cond, &p->mutex);
+            // Catch up startTime when waking up from lockstep to avoid massive budget spikes
             double currentTime = emscripten_get_now();
-            double elapsed = currentTime - startTime;
-            uint64_t targetTotalCycles = (uint64_t)(elapsed * MS_TO_CYCLES);
-            if (targetTotalCycles > totalCyclesExecuted + MAX_CYCLE_BUDGET) {
-                startTime = currentTime - (double)totalCyclesExecuted / MS_TO_CYCLES;
-            }
+            startTime = currentTime - (double)totalCyclesExecuted / MS_TO_CYCLES;
         }
 
         if (!p->active) {
@@ -80,9 +77,11 @@ void mgba_run_player(int playerIndex) {
         }
 
         if (p->core) {
-            // Adaptive Sync: If SIO transfer is active, we prioritize communication over audio buffering
             bool isTransferActive = coordinatorInitialized && coordinator.transferActive;
-            size_t currentAudioLimit = isTransferActive ? 6144 : AUDIO_SAFE_LIMIT;
+            bool isMultiplayer = coordinatorInitialized && coordinator.nAttached > 1;
+
+            // Adaptive Audio Sync: Be more lenient if we are in multiplayer to avoid blocking others
+            size_t currentAudioLimit = isMultiplayer ? 12288 : AUDIO_SAFE_LIMIT;
 
             struct mAudioBuffer* audio = p->core->getAudioBuffer(p->core);
             if (audio && mAudioBufferAvailable(audio) > currentAudioLimit) {
@@ -97,21 +96,22 @@ void mgba_run_player(int playerIndex) {
             
             int64_t budget = (int64_t)(targetTotalCycles - totalCyclesExecuted);
 
-            if (budget > (int64_t)MAX_CYCLE_BUDGET) {
+            // Important: In multiplayer, NEVER skip cycles as it causes SIO desync.
+            // Only cap the budget if we are in single player or if it's extremely large.
+            if (!isMultiplayer && budget > (int64_t)MAX_CYCLE_BUDGET) {
                 budget = MAX_CYCLE_BUDGET;
                 startTime = currentTime - (double)(totalCyclesExecuted + budget) / MS_TO_CYCLES;
             }
 
-            // Adaptive Granularity: Use smaller chunks during active SIO transfer
             uint32_t threshold = isTransferActive ? HIGH_PRECISION_THRESHOLD : DEFAULT_THRESHOLD;
 
             if (budget < (int64_t)threshold) {
                 pthread_mutex_unlock(&p->mutex);
                 if (isTransferActive) {
-                    emscripten_thread_sleep(0); // Yield quickly during transfer
+                    emscripten_thread_sleep(0); 
                 } else {
                     double sleepMs = (double)(threshold - budget) / MS_TO_CYCLES;
-                    if (sleepMs < 1.0) sleepMs = 1.0; 
+                    if (sleepMs < 1.0) sleepMs = 0; // High frequency poll if close
                     emscripten_thread_sleep((unsigned int)sleepMs);
                 }
                 continue;
@@ -123,8 +123,9 @@ void mgba_run_player(int playerIndex) {
             uint32_t startCycles = mTimingCurrentTime(p->core->timing);
             uint32_t endCycles = startCycles + (uint32_t)budget;
 
+            // Optimization: Use runLoop instead of step to stay in WASM longer
             while ((int32_t)(endCycles - mTimingCurrentTime(p->core->timing)) > 0 && !p->lockstepDriver.asleep) {
-                p->core->step(p->core);
+                p->core->runLoop(p->core);
             }
 
             uint32_t actualExecuted = mTimingCurrentTime(p->core->timing) - startCycles;
