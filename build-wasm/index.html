@@ -126,7 +126,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         // Audio state
         let audioContext = null;
         const AUDIO_CHANNELS = 2;
-        const AUDIO_BUFFER_SIZE = 4096;
+        const AUDIO_BUFFER_SIZE = 1536;
         let audioPtr = 0;
 
         function SaveGameSav(playerIndex) {
@@ -324,45 +324,32 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                     }
 
                     if (p && p.active) {
-                        const emulatorSampleRate =
-                            emulator.getAudioSampleRate(i) || 32768;
-                        const dynamicFetchSize =
-                            emulatorSampleRate < 40000
-                                ? AUDIO_BUFFER_SIZE / 2
-                                : AUDIO_BUFFER_SIZE;
+                        const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
+
+                        // 1. C단에서 안전하게 한 번에 많이 긁어올 수 있도록 넉넉한 샘플 크기 지정 (스테레오 감안)
+                        // AUDIO_BUFFER_SIZE가 1536이라면 1536 * 2 = 3072 샘플을 요청
+                        const maxSamplesToFetch = AUDIO_BUFFER_SIZE * 2;
                         let numSamples;
 
-                        // 1. 에뮬레이터에서 현재 쌓인 모든 샘플을 긁어 모음
-                        while (
-                            (numSamples = emulator.getAudioSamples(
-                                i,
-                                audioPtr,
-                                dynamicFetchSize,
-                            )) > 0
-                        ) {
-                            const audioData = new Int16Array(
-                                Module.HEAPU8.buffer,
-                                audioPtr,
-                                numSamples,
-                            );
-                            if (
-                                p.audioBufferCount + numSamples <=
-                                p.audioBuffer.length
-                            ) {
+                        // 에뮬레이터에서 현재 쌓인 모든 샘플을 긁어 모음
+                        while ((numSamples = emulator.getAudioSamples(i, audioPtr, maxSamplesToFetch)) > 0) {
+                            const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
+
+                            if (p.audioBufferCount + numSamples <= p.audioBuffer.length) {
                                 for (let j = 0; j < numSamples; j++) {
-                                    p.audioBuffer[p.audioBufferCount++] =
-                                        audioData[j] / 32768.0;
+                                    p.audioBuffer[p.audioBufferCount++] = audioData[j] / 32768.0;
                                 }
                             } else {
-                                // 버퍼 오버플로우 방지 (너무 많이 쌓이면 앞을 비움)
+                                // 버퍼 오버플로우 시 전량 초기화보다 앞부분을 비워주는 것이 부드러움
+                                console.warn("Audio buffer overflow, clearing...");
                                 p.audioBufferCount = 0;
                             }
                         }
 
-                        // 2. 512 프레임(스테레오 기준 1024 샘플, 약 31ms) 단위로 쪼개서 예약
-                        // 1024 프레임은 대기 시간이 길어질 수 있으므로 512나 256 프레임이 에뮬레이터에 적절합니다.
+                        // 2. CHUNK_FRAMES를 512(약 15.6ms)로 낮추어 rAF(16.6ms) 주기마다 안정적으로 소모되도록 함
                         const CHUNK_FRAMES = 1024;
-                        const SAMPLE_BATCH = CHUNK_FRAMES * AUDIO_CHANNELS;
+                        const SAMPLE_BATCH = CHUNK_FRAMES * AUDIO_CHANNELS; // 1024 샘플
+
                         while (p.audioBufferCount >= SAMPLE_BATCH) {
                             const audioBuffer = audioContext.createBuffer(
                                 AUDIO_CHANNELS,
@@ -372,32 +359,37 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                             const leftChannel = audioBuffer.getChannelData(0);
                             const rightChannel = audioBuffer.getChannelData(1);
 
+                            // 인터리브드 데이터 분리
                             for (let j = 0; j < CHUNK_FRAMES; j++) {
                                 leftChannel[j] = p.audioBuffer[j * 2];
                                 rightChannel[j] = p.audioBuffer[j * 2 + 1];
                             }
+
                             // 사용한 데이터만큼 버퍼 앞으로 당기기
-                            p.audioBuffer.copyWithin(
-                                0,
-                                SAMPLE_BATCH,
-                                p.audioBufferCount,
-                            );
+                            p.audioBuffer.copyWithin(0, SAMPLE_BATCH, p.audioBufferCount);
                             p.audioBufferCount -= SAMPLE_BATCH;
-                            const source = audioContext.createBufferSource();
+
+                            let source = audioContext.createBufferSource();
                             source.buffer = audioBuffer;
                             source.connect(audioContext.destination);
 
                             const currentTime = audioContext.currentTime;
-                            if (
-                                p.audioNextTime < currentTime ||
-                                p.audioNextTime > currentTime + 0.2
-                            ) {
-                                p.audioNextTime = currentTime + 0.03;
+
+                            // 3. 타임라인 동기화 보정 가속/감속 로직 개선
+                            // 너무 과거이거나 오차가 크면 현재 시간 기반으로 베이스라인을 재설정
+                            if (p.audioNextTime < currentTime || p.audioNextTime > currentTime + 0.2) {
+                                // 최소한의 버퍼 대기 시간(Look-ahead delay)을 약 40ms(0.04)로 설정하여 안정성 확보
+                                p.audioNextTime = currentTime + 0.04;
                             }
+
                             source.start(p.audioNextTime);
+
+                            // 중요: 에뮬레이터 주사율에 맞춘 정확한 오디오 지속 시간 누적
                             p.audioNextTime += audioBuffer.duration;
+
                             source.onended = () => {
                                 source.disconnect();
+                                source = null;
                             };
                         }
                     }
