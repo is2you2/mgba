@@ -321,9 +321,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                                 p.ctx.putImageData(p.imageData, 0, 0);
                             }
                         }
-                    }
 
-                    if (p && p.active) {
                         const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
 
                         // 1. C단에서 안전하게 한 번에 많이 긁어올 수 있도록 넉넉한 샘플 크기 지정 (스테레오 감안)
@@ -384,8 +382,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
                             source.start(p.audioNextTime);
 
-                            // 중요: 에뮬레이터 주사율에 맞춘 정확한 오디오 지속 시간 누적
-                            p.audioNextTime += audioBuffer.duration;
+                            p.audioNextTime += (CHUNK_FRAMES / emulatorSampleRate);
 
                             source.onended = () => {
                                 source.disconnect();
