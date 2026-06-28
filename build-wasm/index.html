@@ -126,7 +126,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
         // Audio state
         let audioContext = null;
         const AUDIO_CHANNELS = 2;
-        const AUDIO_BUFFER_SIZE = 1536;
+        const AUDIO_BUFFER_SIZE = 1096;
         let audioPtr = 0;
 
         function SaveGameSav(playerIndex) {
@@ -323,14 +323,17 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                         }
 
                         const emulatorSampleRate = emulator.getAudioSampleRate(i) || 32768;
-
-                        // 1. C단에서 안전하게 한 번에 많이 긁어올 수 있도록 넉넉한 샘플 크기 지정 (스테레오 감안)
-                        // AUDIO_BUFFER_SIZE가 1536이라면 1536 * 2 = 3072 샘플을 요청
-                        const maxSamplesToFetch = AUDIO_BUFFER_SIZE * 2;
+                        const dynamicFetchSize =
+                            emulatorSampleRate < 40000
+                                ? AUDIO_BUFFER_SIZE
+                                : AUDIO_BUFFER_SIZE * 2;
                         let numSamples;
 
+                        let chunksProcessed = 0;
+
                         // 에뮬레이터에서 현재 쌓인 모든 샘플을 긁어 모음
-                        while ((numSamples = emulator.getAudioSamples(i, audioPtr, maxSamplesToFetch)) > 0) {
+                        while ((numSamples = emulator.getAudioSamples(i, audioPtr, dynamicFetchSize)) > 0) {
+                            chunksProcessed++;
                             const audioData = new Int16Array(Module.HEAPU8.buffer, audioPtr, numSamples);
 
                             if (p.audioBufferCount + numSamples <= p.audioBuffer.length) {
@@ -342,6 +345,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
                                 console.warn("Audio buffer overflow, clearing...");
                                 p.audioBufferCount = 0;
                             }
+                            if (chunksProcessed >= 1) break;
                         }
 
                         // 2. CHUNK_FRAMES를 512(약 15.6ms)로 낮추어 rAF(16.6ms) 주기마다 안정적으로 소모되도록 함
